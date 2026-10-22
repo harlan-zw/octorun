@@ -303,6 +303,41 @@ describe('adversarial review preset', () => {
 })
 
 describe('custom change summary chain', () => {
+  it.each(['x', '界'])('fits a large classified diff within the remaining summary budget: %s', async (character) => {
+    const files = [
+      { path: 'src/small.ts', status: 'modified', truncated: false, patch: '@@ -1 +1 @@\n-old\n+new' },
+      { path: 'src/large.ts', status: 'modified', truncated: false, patch: `@@ -1 +1 @@\n-old\n+${character.repeat(100_000)}` },
+    ]
+    const h = harness(['Update the input handling.'], [], { ...snapshot, files }, { inputTokenOverhead: 2048 })
+    const changes = await successful(h.execute('changes.classify', {}))
+    await successful(h.execute('changes.summarize', { changes }))
+    const request = h.requests[0]!
+    const payload = JSON.parse(request.messages[1]!.content)
+    expect(payload.files.map((file: { path: string }) => file.path)).toEqual(['src/small.ts', 'src/large.ts'])
+    expect(payload.files[0].patch).toBe(files[0]!.patch)
+    expect(payload.files[1].patch.length).toBeLessThan(99_000)
+    expect(payload.coverage).toBe('incomplete')
+    expect(payload.truncatedFiles).toContain('src/large.ts')
+    expect(payload.files[1].patch).not.toContain('\uFFFD')
+    expect(request.maxOutputTokens).toBe(1024)
+    expect(h.reservations[0]!.inputTokens + h.reservations[0]!.outputTokens).toBeLessThanOrEqual(100_000)
+    expect(h.turns).toHaveLength(1)
+  })
+
+  it('reports omitted file metadata when prior usage leaves a small summary budget', async () => {
+    const h = harness(['Some changes could not fit this summary.'], [], snapshot, { inputTokenOverhead: 2048 })
+    h.context.run.usage.inputTokens = 90_000
+    const files = Array.from({ length: 200 }, (_, index) => ({ path: `src/${index}-${'x'.repeat(900)}.ts`, category: 'source', patch: null }))
+    await successful(h.execute('changes.summarize', { changes: { headSha, coverage: 'complete', files } }))
+    const payload = JSON.parse(h.requests[0]!.messages[1]!.content)
+    expect(payload.files.length).toBeGreaterThan(0)
+    expect(payload.files[0]).toEqual(files[0])
+    expect(payload.omittedFiles).toBe(200 - payload.files.length)
+    expect(payload.coverage).toBe('incomplete')
+    expect(h.reservations[0]!.inputTokens + h.reservations[0]!.outputTokens).toBeLessThanOrEqual(10_000)
+    expect(h.turns).toHaveLength(1)
+  })
+
   it('classifies files, generates a summary, and publishes a comment without review state', async () => {
     const h = harness(['Handle account names directly.'])
     const changes = await successful(h.execute('changes.classify', {}))

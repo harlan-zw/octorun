@@ -105,6 +105,10 @@ function inputTokenCeiling(turn: PlannedTurn, inputTokenOverhead: number): numbe
   return inputTokenOverhead + turn.messages.reduce((tokens, message) => tokens + Buffer.byteLength(message.content, 'utf8') + 32, 0)
 }
 
+function clipUtf8(value: string, maxBytes: number): string {
+  return new TextDecoder().decode(Buffer.from(value, 'utf8').subarray(0, Math.max(0, maxBytes)), { stream: true })
+}
+
 /** UTF-8 bytes conservatively bound text tokens. Framing receives a separate reserve. */
 async function reserveTurns(context: TaskContext, turns: PlannedTurn[], localUsage: Usage, inputTokenOverhead: Result<number>): Promise<Result<ReservedTurn[]>> {
   if (inputTokenOverhead._tag === 'Err')
@@ -484,8 +488,7 @@ function conversationTurn(context: TaskContext, conversation: ConversationInput[
     else if (current.files.some(file => file.patch)) {
       const file = current.files.find(file => file.patch)!
       const overflow = inputTokenCeiling(turn(), inputTokenOverhead.value) + maxOutputTokens - remaining
-      const bytes = Buffer.from(file.patch!, 'utf8')
-      const clipped = new TextDecoder().decode(bytes.subarray(0, Math.max(0, bytes.length - overflow - 64)), { stream: true })
+      const clipped = clipUtf8(file.patch!, Buffer.byteLength(file.patch!, 'utf8') - overflow - 64)
       const newline = clipped.lastIndexOf('\n')
       file.patch = newline < 0 ? '' : clipped.slice(0, newline)
       file.truncated = true
@@ -522,6 +525,42 @@ function parseSummary(value: unknown): Result<{ text: string, headSha: string }>
   return object(value) && text(value.text, 12_000) && value.text.trim() && sha(value.headSha)
     ? ok({ text: value.text, headSha: value.headSha })
     : invalid('The change summary is empty or exceeds its limit.')
+}
+
+function summaryTurn(context: TaskContext, changes: ClassifiedChanges, inputTokenOverhead: Result<number>): Result<PlannedTurn> {
+  if (inputTokenOverhead._tag === 'Err')
+    return inputTokenOverhead
+  const selected = structuredClone(changes)
+  const truncatedFiles = new Set<string>()
+  let omittedFiles = 0
+  const remaining = context.run.definition.limits.maxTokens - context.run.usage.inputTokens - context.run.usage.outputTokens
+  const turn = (): PlannedTurn => ({ messages: [
+    { role: 'system', content: `${inertInstructions}\nWrite a concise release summary from these changed files. Describe behavior supported by the patches. State when the scope is incomplete. Return plain Markdown, at most 200 words.` },
+    { role: 'user', content: JSON.stringify({ ...selected, omittedFiles, truncatedFiles: [...truncatedFiles] }) },
+  ], maxOutputTokens: 1024 })
+  let planned = turn()
+  while (inputTokenCeiling(planned, inputTokenOverhead.value) + planned.maxOutputTokens > remaining) {
+    const largest = selected.files.reduce<{ index: number, bytes: number }>((found, file, index) => {
+      const bytes = file.patch === null ? 0 : Buffer.byteLength(file.patch, 'utf8')
+      return bytes > found.bytes ? { index, bytes } : found
+    }, { index: -1, bytes: 0 })
+    if (largest.index >= 0) {
+      const file = selected.files[largest.index]!
+      const overflow = inputTokenCeiling(planned, inputTokenOverhead.value) + planned.maxOutputTokens - remaining
+      file.patch = clipUtf8(file.patch!, largest.bytes - overflow - 64) || null
+      truncatedFiles.add(file.path)
+    }
+    else if (selected.files.length) {
+      truncatedFiles.delete(selected.files.pop()!.path)
+      omittedFiles++
+    }
+    else {
+      return invalid('The remaining token budget cannot cover this summary. Increase maxTokens before retrying.')
+    }
+    selected.coverage = 'incomplete'
+    planned = turn()
+  }
+  return ok(planned)
 }
 
 export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskType[] {
@@ -684,10 +723,10 @@ export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskTyp
     const changes = parseChanges(value.changes)
     return changes._tag === 'Err' ? changes : ok({ changes: changes.value })
   }, outputParser(parseSummary), async (context, { changes }) => {
-    const response = await generateTurn(context, dependencies.provider, { messages: [
-      { role: 'system', content: `${inertInstructions}\nWrite a concise release summary from these changed files. Describe behavior supported by the patches. State when the scope is incomplete. Return plain Markdown, at most 200 words.` },
-      { role: 'user', content: JSON.stringify(changes) },
-    ], maxOutputTokens: 1024 }, inputTokenOverhead)
+    const planned = summaryTurn(context, changes, inputTokenOverhead)
+    if (planned._tag === 'Err')
+      return { _tag: 'Failed', error: planned.error }
+    const response = await generateTurn(context, dependencies.provider, planned.value, inputTokenOverhead)
     if (response._tag === 'Err')
       return { _tag: 'Failed', error: response.error, usage: failureUsage(response.error) }
     const summary = parseSummary({ text: response.value.text, headSha: changes.headSha })
