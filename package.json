@@ -46,7 +46,7 @@
   },
   "scripts": {
     "build": "obuild && tsc --project tsconfig.build.json && pnpm check:consumer",
-    "check:consumer": "tsc --project tsconfig.consumer.json && node --experimental-strip-types scripts/check-runtime.ts",
+    "check:consumer": "tsc --project tsconfig.consumer.json && node .build/consumer/scripts/check-runtime.js",
     "dev": "node --experimental-strip-types src/cli.ts",
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit",
