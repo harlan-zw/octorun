@@ -124,6 +124,17 @@ export async function createOctorun(options: OctorunServiceOptions) {
       return metadata
     if (metadata.value.ref.id !== run.event.repository.id || metadata.value.ref.installationId !== run.event.repository.installationId)
       return err({ _tag: 'Authorization', message: 'The workflow repository installation changed.' })
+    if (['Queued', 'Running', 'Waiting'].includes(run.state._tag) && run.event.target._tag === 'PullRequest'
+      && run.tasks.some(task => taskTypes.some(type => type.id === task.definition.uses && type.capabilities.includes('agent:invoke')))) {
+      const current = await client.snapshot(repository.value.fullName, run.event.target.number)
+      if (current._tag === 'Err')
+        return current
+      if (current.value.draft || current.value.state === 'closed') {
+        const reason = current.value.draft ? 'The pull request is a draft.' : 'The pull request closed.'
+        runner.cancel(run.id, reason)
+        return err({ _tag: 'Authorization', message: reason })
+      }
+    }
     if (['Queued', 'Running', 'Waiting'].includes(run.state._tag) && (run.event.action === 'command' || run.event.name === 'octorun.conversation')) {
       const permission = await authorizeGitHubCommand({ command: { _tag: 'Review', full: false }, actor: run.event.actor, repository: repository.value.fullName, resolvePermission: (name, actor) => client.permission(name, actor) })
       if (permission._tag === 'Err')
@@ -131,7 +142,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
     }
     return ok(repository.value.policy)
   }
-  const publisher = createGitHubPublisher({ client, authorize: async (context) => {
+  const publisher = createGitHubPublisher({ client, nativeCheckActions: secrets.value.webhookSecret !== null, authorize: async (context) => {
     const repository = configured(context.run.event.repository.fullName)
     if (repository._tag === 'Err')
       return repository
@@ -269,17 +280,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
       const command = parseGitHubCommand(data.body, config.handle)
       if (command._tag === 'Command')
         return executeCommand(event, repository.value, command.command)
-      if (command._tag === 'Unknown') {
-        const permission = await authorizeGitHubCommand({ command: { _tag: 'Help' }, actor: event.actor, repository: event.repository.fullName, resolvePermission: (name, actor) => client.permission(name, actor) })
-        if (permission._tag === 'Err')
-          return permission
-        const response = commandResponse(event, repository.value, `Unknown command.\n${help}`)
-        return response._tag === 'Err' ? response : ok({ runId: response.value.id })
-      }
       if (event.name === 'pull_request_review_comment' && githubId(data.inReplyToId) && event.target._tag === 'PullRequest') {
-        const permission = await authorizeGitHubCommand({ command: { _tag: 'Review', full: false }, actor: event.actor, repository: event.repository.fullName, resolvePermission: (name, actor) => client.permission(name, actor) })
-        if (permission._tag === 'Err')
-          return permission
         const root = await client.request(event.repository.fullName, 'read', `${githubRepositoryPath(event.repository.fullName)}/pulls/comments/${data.inReplyToId}`)
         if (root._tag === 'Err')
           return root
@@ -287,15 +288,25 @@ export async function createOctorun(options: OctorunServiceOptions) {
         if (bot._tag === 'Err')
           return bot
         const rootComment = githubObject(root.value)
-        if (!rootComment || !isOctorunFinding(rootComment, bot.value.id))
-          return ok({ ignored: true })
-        const comments = await client.paginate(event.repository.fullName, `${githubRepositoryPath(event.repository.fullName)}/pulls/${event.target.number}/comments`)
-        if (comments._tag === 'Err')
-          return comments
-        const history = comments.value.filter(raw => githubObject(raw)?.in_reply_to_id === data.inReplyToId && githubObject(raw)?.id !== data.commentId).slice(-20).map(raw => ({ role: githubObject(githubObject(raw)?.user)?.id === bot.value.id ? 'assistant' : 'user', content: String(githubObject(raw)?.body ?? '').slice(0, 4000) }))
-        const conversation: EventEnvelope = { ...event, name: 'octorun.conversation', data: { commentId: data.inReplyToId, question: data.body.slice(0, 8000), reviewedHeadSha: typeof rootComment.commit_id === 'string' ? rootComment.commit_id : null, finding: { body: String(rootComment.body ?? '').slice(0, 10000), path: typeof rootComment.path === 'string' ? rootComment.path : null, line: typeof rootComment.line === 'number' ? rootComment.line : null }, history } }
-        const started = startWorkflow(conversation, conversationPreset(), repository.value, { source: 'operator:review-conversation', sha: 'operator', digest: 'review-conversation-v1' }, `conversation:${event.semanticKey}`)
-        return started._tag === 'Err' ? started : ok({ runId: started.value.id })
+        if (rootComment && isOctorunFinding(rootComment, bot.value.id)) {
+          const permission = await authorizeGitHubCommand({ command: { _tag: 'Review', full: false }, actor: event.actor, repository: event.repository.fullName, resolvePermission: (name, actor) => client.permission(name, actor) })
+          if (permission._tag === 'Err')
+            return permission
+          const comments = await client.paginate(event.repository.fullName, `${githubRepositoryPath(event.repository.fullName)}/pulls/${event.target.number}/comments`)
+          if (comments._tag === 'Err')
+            return comments
+          const history = comments.value.filter(raw => githubObject(raw)?.in_reply_to_id === data.inReplyToId && githubObject(raw)?.id !== data.commentId).slice(-20).map(raw => ({ role: githubObject(githubObject(raw)?.user)?.id === bot.value.id ? 'assistant' : 'user', content: String(githubObject(raw)?.body ?? '').slice(0, 4000) }))
+          const conversation: EventEnvelope = { ...event, name: 'octorun.conversation', data: { commentId: data.inReplyToId, question: data.body.slice(0, 8000), reviewedHeadSha: typeof rootComment.commit_id === 'string' ? rootComment.commit_id : null, finding: { body: String(rootComment.body ?? '').slice(0, 10000), path: typeof rootComment.path === 'string' ? rootComment.path : null, line: typeof rootComment.line === 'number' ? rootComment.line : null }, history } }
+          const started = startWorkflow(conversation, conversationPreset(), repository.value, { source: 'operator:review-conversation', sha: 'operator', digest: 'review-conversation-v1' }, `conversation:${event.semanticKey}`)
+          return started._tag === 'Err' ? started : ok({ runId: started.value.id })
+        }
+      }
+      if (command._tag === 'Unknown') {
+        const permission = await authorizeGitHubCommand({ command: { _tag: 'Help' }, actor: event.actor, repository: event.repository.fullName, resolvePermission: (name, actor) => client.permission(name, actor) })
+        if (permission._tag === 'Err')
+          return permission
+        const response = commandResponse(event, repository.value, `Unknown command.\n${help}`)
+        return response._tag === 'Err' ? response : ok({ runId: response.value.id })
       }
       return ok({ ignored: true })
     }

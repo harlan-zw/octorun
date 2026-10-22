@@ -169,6 +169,17 @@ export async function pollGitHubEvents(options: { client: GitHubClient, reposito
   if (prs._tag === 'Err')
     return prs
   const snapshots = new Map<number, PullRequestSnapshot>()
+  const observe = (snapshot: PullRequestSnapshot): void => {
+    snapshots.set(snapshot.number, snapshot)
+    const target = pullTarget(snapshot) as Extract<EventTarget, { _tag: 'PullRequest' }>
+    const semanticKey = pullRequestSemanticKey(repository.value.ref, target, snapshot)
+    if (snapshot.state === 'open')
+      cursor.pullRequests[String(snapshot.number)] = semanticKey
+    if ((!previous && options.includeExisting !== true) || previous?.pullRequests[String(snapshot.number)] === semanticKey)
+      return
+    const observation = { repository: repository.value.ref, target, semanticKey, occurredAt: snapshot.updatedAt, data: { draft: snapshot.draft, state: snapshot.state, labels: snapshot.labels, title: snapshot.title, author: snapshot.author.login } }
+    events.push({ id: `poll:${githubDigest(JSON.stringify(observation))}`, source: 'poll', name: 'pull_request', action: 'observed', actor: null, receivedAt, ...observation })
+  }
   for (const raw of prs.value) {
     const number = githubObject(raw)?.number
     if (!githubId(number))
@@ -176,14 +187,19 @@ export async function pollGitHubEvents(options: { client: GitHubClient, reposito
     const snapshot = await options.client.snapshot(options.repository, number, options.signal)
     if (snapshot._tag === 'Err')
       return snapshot
-    snapshots.set(number, snapshot.value)
-    const target = pullTarget(snapshot.value) as Extract<EventTarget, { _tag: 'PullRequest' }>
-    const semanticKey = pullRequestSemanticKey(repository.value.ref, target, snapshot.value)
-    cursor.pullRequests[String(number)] = semanticKey
-    if ((!previous && options.includeExisting !== true) || previous?.pullRequests[String(number)] === semanticKey)
+    observe(snapshot.value)
+  }
+  // A missing open pull request may have closed since the previous observation.
+  for (const key of Object.keys(previous?.pullRequests ?? {})) {
+    if (snapshots.has(Number(key)))
       continue
-    const observation = { repository: repository.value.ref, target, semanticKey, occurredAt: snapshot.value.updatedAt, data: { draft: snapshot.value.draft, state: snapshot.value.state, labels: snapshot.value.labels, title: snapshot.value.title, author: snapshot.value.author.login } }
-    events.push({ id: `poll:${githubDigest(JSON.stringify(observation))}`, source: 'poll', name: 'pull_request', action: 'observed', actor: null, receivedAt, ...observation })
+    const number = Number(key)
+    if (!githubId(number))
+      return err({ _tag: 'Configuration', message: 'The GitHub poll cursor contains an invalid pull request number.' })
+    const snapshot = await options.client.snapshot(options.repository, number, options.signal)
+    if (snapshot._tag === 'Err')
+      return snapshot
+    observe(snapshot.value)
   }
   // Overlap one second so comments with equal timestamps are not lost between passes.
   const since = new Date(Date.parse(previous?.since ?? receivedAt) - 1000).toISOString()
