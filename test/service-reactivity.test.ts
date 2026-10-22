@@ -1,4 +1,4 @@
-import type { AgentProvider, GitHubClient, OctorunService, OperatorConfig, PullRequestSnapshot } from '../src/index.ts'
+import type { AgentProvider, GitHubClient, OctorunService, OperatorConfig, PullRequestSnapshot, Result, RunRecord, TaskType } from '../src/index.ts'
 import { createHmac } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -18,10 +18,11 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).reverse().map(close => close()))
 })
 
-async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'write', webhook?: boolean, holdProvider?: boolean } = {}) {
+async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'write', webhook?: boolean, holdProvider?: boolean, authorizeRun?: (run: RunRecord) => Promise<Result<void>>, execute?: TaskType['execute'] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'octorun-reactivity-'))
   let open = true
   let draft = false
+  let archived = false
   let providerCalls = 0
   let abortedCalls = 0
   let clockMs = now.getTime()
@@ -41,7 +42,7 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
   const snapshot = (): PullRequestSnapshot => ({ repository, number: 1, headSha: head, baseSha: base, title: 'Change parser', body: '', author: user, draft, state: open ? 'open' : 'closed', changedFiles: 1, updatedAt: now.toISOString(), labels: [], headRepository: repository.fullName })
   const client: GitHubClient = {
     auth: { appId: 7, token: async () => ok({ token: 'fixture', expiresAt: '2026-10-23T00:00:00Z', installationId: 20 }), identity: async () => ok({ id: 7, slug: 'octorun' }), invalidate: () => {} },
-    repository: async () => ok({ ref: repository, defaultBranch: 'main', private: false, archived: false }),
+    repository: async () => ok({ ref: repository, defaultBranch: 'main', private: false, archived }),
     snapshot: async () => ok(snapshot()),
     files: async () => ok([{ path: 'src/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', status: 'modified', truncated: false, additions: 1, deletions: 1 }]),
     permission: async () => ok(options.permission ?? 'write'),
@@ -122,8 +123,11 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
       return ok({ text: request.messages[0]!.content.includes('Review as a ') ? '{"findings":[]}' : 'The finding applies to the changed parser.', usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
     },
   }
+  if (options.execute) {
+    config.repositories[0]!.workflowSource = { _tag: 'Inline', definitions: [{ version: 1, id: 'authority-test', name: 'Authority test', on: [], tasks: [{ id: 'execute', uses: 'fixture.authority', with: {} }], concurrency: { mode: 'queue', group: 'target' }, limits: { maxAttempts: 1, timeoutMs: 1000, maxTokens: 1000, maxCostUsd: null, maxDurationMs: 60000 } }] }
+  }
   const create = async (): Promise<OctorunService> => {
-    const created = await createOctorun({ config, env: { APP_KEY: 'fixture', ...(options.webhook === false ? {} : { WEBHOOK_SECRET: secret }) }, now: () => new Date(clockMs), client, provider })
+    const created = await createOctorun({ config, env: { APP_KEY: 'fixture', ...(options.webhook === false ? {} : { WEBHOOK_SECRET: secret }) }, now: () => new Date(clockMs), client, provider, ...(options.authorizeRun ? { authorizeRun: options.authorizeRun } : {}), ...(options.execute ? { taskTypes: [{ id: 'fixture.authority', version: '1', capabilities: ['agent:invoke', 'github:comment'], input: () => ok(null), output: () => ok(null), execute: options.execute }] } : {}) })
     if (created._tag === 'Err')
       throw new Error(created.error.message)
     return created.value
@@ -134,6 +138,7 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
     await rm(stateDir, { recursive: true })
   })
   return {
+    config,
     comments,
     replies,
     checks,
@@ -142,6 +147,7 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
     service: () => service,
     closePr: () => { open = false },
     setDraft: () => { draft = true },
+    archive: () => { archived = true },
     advanceClock: () => { clockMs += 5000 },
     async restart() {
       await service.close()
@@ -201,7 +207,110 @@ describe('finding conversations', () => {
   })
 })
 
+describe('host repository authority', () => {
+  const denial = { _tag: 'Authorization' as const, message: 'The host requires current repository approval.' }
+  const denied = err(denial)
+
+  it('denies execution before a provider turn and preserves the host reason', async () => {
+    const test = await setup({ authorizeRun: async () => denied })
+    await test.service().run({ repository: repository.fullName, number: 1 })
+    await test.service().settle()
+    expect(test.calls()).toBe(0)
+    expect(test.comments).toEqual([])
+    expect(test.service().runner.runs()[0]?.state).toEqual({ _tag: 'Failed', error: denial })
+    expect(test.checks).toEqual([expect.objectContaining({ status: 'completed', conclusion: 'action_required', output: expect.objectContaining({ summary: expect.stringContaining(denial.message) }) })])
+  })
+
+  it('rechecks host authority before each paid reservation within one task', async () => {
+    let allowed = true
+    let paidCalls = 0
+    const test = await setup({
+      authorizeRun: async () => allowed ? ok(undefined) : denied,
+      async execute(context) {
+        for (let turn = 0; turn < 2; turn++) {
+          const reservation = await context.reserveUsage({ inputTokens: 5, outputTokens: 5, costUsd: null })
+          if (reservation._tag === 'Err')
+            return { _tag: 'Failed', error: reservation.error }
+          paidCalls++
+          await context.settleUsage(reservation.value, { inputTokens: 5, outputTokens: 5, costUsd: null })
+          allowed = false
+        }
+        return { _tag: 'Succeeded', output: null }
+      },
+    })
+    await test.service().run({ repository: repository.fullName, number: 1, workflow: 'authority-test' })
+    await test.service().settle()
+    expect(paidCalls).toBe(1)
+    expect(test.service().runner.runs()[0]?.state).toEqual({ _tag: 'Failed', error: denial })
+  })
+
+  it('withholds queued result publication after host authority is revoked', async () => {
+    let allowed = true
+    const test = await setup({
+      authorizeRun: async () => allowed ? ok(undefined) : denied,
+      async execute(context) {
+        const publication = await context.publish('result', { _tag: 'Comment', repository: repository.fullName, number: 1, namespace: 'authority-test', body: 'A result.' })
+        if (publication._tag === 'Err')
+          return { _tag: 'Failed', error: publication.error }
+        allowed = false
+        return { _tag: 'Succeeded', output: null }
+      },
+    })
+    await test.service().run({ repository: repository.fullName, number: 1, workflow: 'authority-test' })
+    await test.service().settle()
+    expect(test.comments).toEqual([])
+    expect(test.service().runner.runs()[0]?.state).toEqual({ _tag: 'Failed', error: denial })
+    expect(test.checks).toEqual([expect.objectContaining({ status: 'completed', conclusion: 'action_required' })])
+  })
+
+  it('aborts an active provider turn after host authority is revoked', async () => {
+    let allowed = true
+    const test = await setup({ holdProvider: true, authorizeRun: async () => allowed ? ok(undefined) : denied })
+    await test.service().run({ repository: repository.fullName, number: 1 })
+    for (let pass = 0; pass < 10 && test.calls() === 0; pass++)
+      await test.service().tick()
+    expect(test.calls()).toBeGreaterThan(0)
+    const dispatched = test.calls()
+    allowed = false
+    test.advanceClock()
+    await test.service().tick()
+    await test.service().settle()
+    expect(test.aborted()).toBe(dispatched)
+    expect(test.calls()).toBe(dispatched)
+    expect(test.service().runner.runs()[0]?.state).toEqual({ _tag: 'Failed', error: denial })
+    expect(test.checks).toEqual([expect.objectContaining({ status: 'completed', conclusion: 'action_required' })])
+  })
+
+  it('does not let host authorization grant a disabled capability', async () => {
+    const test = await setup({ authorizeRun: async () => ok(undefined) })
+    test.config.repositories[0]!.policy.capabilities = ['repository:read']
+    expect(await test.service().run({ repository: repository.fullName, number: 1 })).toMatchObject({ _tag: 'Err', error: { _tag: 'Authorization' } })
+    expect(test.calls()).toBe(0)
+  })
+})
+
 describe('pull request eligibility', () => {
+  it('refuses archived repository execution before a paid turn', async () => {
+    const test = await setup()
+    await test.service().poll({ backfill: true })
+    test.archive()
+    await test.service().settle()
+    expect(test.calls()).toBe(0)
+    expect(test.service().runner.runs()[0]?.state).toMatchObject({ _tag: 'Failed', error: { _tag: 'Authorization' } })
+  })
+
+  it.each(['id', 'installationId'] as const)('rechecks the configured %s when recovering a queued run', async (pin) => {
+    const test = await setup()
+    await test.service().poll({ backfill: true })
+    test.config.repositories[0]![pin]++
+    await test.restart()
+    await test.service().settle()
+    expect(test.calls()).toBe(0)
+    expect(test.comments).toEqual([])
+    expect(test.checks).toEqual([])
+    expect(test.service().runner.runs()[0]?.state).toMatchObject({ _tag: 'Failed', error: { _tag: 'Authorization' } })
+  })
+
   it('cancels a queued review when polling observes its pull request close after restart', async () => {
     const test = await setup()
     expect((await test.service().poll({ backfill: true }))._tag).toBe('Ok')
