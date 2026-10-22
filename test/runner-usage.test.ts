@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { adversarialReviewPreset, createOpenAICompatibleProvider, createReviewTaskTypes, createRunner, openStore, parseJsonValue, parseWorkflow } from '../src/index.ts'
+import { adversarialReviewPreset, changeSummaryPreset, createOpenAICompatibleProvider, createReviewTaskTypes, createRunner, openStore, parseJsonValue, parseWorkflow } from '../src/index.ts'
 
 const event: EventEnvelope = {
   id: 'reservation-event',
@@ -42,6 +42,32 @@ function start(runner: ReturnType<typeof createRunner>, maxTokens = 80) {
 }
 
 describe('durable usage reservations', () => {
+  it('settles a provider prompt with framing above the HTTP default', async () => {
+    const usage = { inputTokens: 4000, outputTokens: 10, costUsd: null }
+    const types = createReviewTaskTypes({ snapshots: { read: async () => ({ _tag: 'Ok', value: {
+      headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      title: 'Change the name',
+      body: '',
+      files: [{ path: 'name.ts', status: 'modified', truncated: false, patch: '@@ -1 +1 @@\n-old\n+new' }],
+    } }) }, provider: {
+      id: 'framed-provider',
+      inputTokenOverhead: 4096,
+      generate: async () => ({ _tag: 'Ok', value: { text: 'Update the displayed name.', usage } }),
+    } })
+    const workflow = changeSummaryPreset()
+    workflow.tasks = workflow.tasks.slice(0, 2)
+    const store = openStore({ path: ':memory:' })
+    const runner = createRunner({ store, taskTypes: types })
+    const run = runner.start({ event, workflow, policy: { ...policy, capabilities: ['repository:read', 'agent:invoke'] }, configuration: { source: 'fixture', sha: 'trusted', digest: 'fixture' } })
+    if (run._tag === 'Err')
+      throw new Error(run.error.message)
+    await runner.drain()
+    expect(runner.inspect(run.value.id)).toMatchObject({ state: { _tag: 'Succeeded' }, usage })
+    await runner.close()
+    store.close()
+  })
+
   it('records known zero cost when no provider call is needed', async () => {
     let calls = 0
     const types = createReviewTaskTypes({ snapshots: { read: async () => ({ _tag: 'Ok', value: { headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), title: 'No changes', body: '', files: [] } }) }, provider: {

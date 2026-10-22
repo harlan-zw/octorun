@@ -101,7 +101,7 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
       return { _tag: 'Err', error: { _tag: 'Permanent', message: `Unexpected fixture route: ${pathAccess} ${path}.` } }
     },
   }
-  const provider: AgentProvider = { id: 'test-provider', async generate(request) {
+  const provider: AgentProvider = { id: 'test-provider', inputTokenOverhead: 256, async generate(request) {
     providerCalls++
     if (options.failProvider)
       return { _tag: 'Err', error: { _tag: 'Permanent', message: 'The provider rejected this request.' } }
@@ -130,6 +130,8 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
     currentHead = sha
   }, setPermission: (value: 'read' | 'write') => {
     permission = value
+  }, setProviderInputTokenOverhead: (value: number) => {
+    provider.inputTokenOverhead = value
   }, restart: async () => {
     await service.close()
     service = await create()
@@ -246,6 +248,16 @@ describe('reactive service composition', () => {
     const test = await setup()
     expect(await test.service().run({ repository: repo.fullName, number: 1, requestId: 'pinned-provider' })).toMatchObject({ _tag: 'Ok', value: { state: 'Queued' } })
     test.config.provider.model = 'different-model'
+    await test.restart()
+    await test.service().settle()
+    expect(test.providerCalls()).toBe(0)
+    expect(test.service().runner.runs()).toMatchObject([{ state: { _tag: 'Failed', error: { _tag: 'Configuration' } } }])
+  })
+
+  it('refuses a changed provider token allowance when recovering accepted work', async () => {
+    const test = await setup()
+    expect(await test.service().run({ repository: repo.fullName, number: 1, requestId: 'pinned-provider-overhead' })).toMatchObject({ _tag: 'Ok', value: { state: 'Queued' } })
+    test.setProviderInputTokenOverhead(2048)
     await test.restart()
     await test.service().settle()
     expect(test.providerCalls()).toBe(0)

@@ -113,7 +113,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
     const report = githubObject(output)
     return report && typeof report.headSha === 'string' && typeof report.baseSha === 'string' && Array.isArray(report.fingerprints) && report.fingerprints.every(value => typeof value === 'string') ? { headSha: report.headSha, baseSha: report.baseSha, fingerprints: report.fingerprints as string[] } : null
   } })
-  const providerBinding = digest({ id: provider.value.id, baseUrl: config.provider.baseUrl, model: config.provider.model, timeoutMs: config.provider.timeoutMs, maxResponseBytes: config.provider.maxResponseBytes, maxInputCharacters: config.provider.maxInputCharacters })
+  const providerBinding = digest({ id: provider.value.id, inputTokenOverhead: provider.value.inputTokenOverhead ?? 256, baseUrl: config.provider.baseUrl, model: config.provider.model, timeoutMs: config.provider.timeoutMs, maxResponseBytes: config.provider.maxResponseBytes, maxInputCharacters: config.provider.maxInputCharacters })
   const pinnedReviewTypes = reviewTypes.map(type => type.capabilities.includes('agent:invoke') ? { ...type, version: `${type.version}:${providerBinding}` } : type)
   const currentPolicy = async (run: RunRecord): Promise<Result<RepositoryPolicy>> => {
     const repository = configured(run.event.repository.fullName)

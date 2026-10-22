@@ -101,16 +101,18 @@ function failureUsage(error: TaskFailure): Usage {
 interface PlannedTurn { messages: AgentMessage[], maxOutputTokens: number }
 interface ReservedTurn { request: AgentRequest, reservationId: string }
 
-function inputTokenCeiling(turn: PlannedTurn): number {
-  return 256 + turn.messages.reduce((tokens, message) => tokens + Buffer.byteLength(message.content, 'utf8') + 32, 0)
+function inputTokenCeiling(turn: PlannedTurn, inputTokenOverhead: number): number {
+  return inputTokenOverhead + turn.messages.reduce((tokens, message) => tokens + Buffer.byteLength(message.content, 'utf8') + 32, 0)
 }
 
 /** UTF-8 bytes conservatively bound text tokens. Framing receives a separate reserve. */
-async function reserveTurns(context: TaskContext, turns: PlannedTurn[], localUsage: Usage): Promise<Result<ReservedTurn[]>> {
+async function reserveTurns(context: TaskContext, turns: PlannedTurn[], localUsage: Usage, inputTokenOverhead: Result<number>): Promise<Result<ReservedTurn[]>> {
+  if (inputTokenOverhead._tag === 'Err')
+    return inputTokenOverhead
   if (context.run.definition.limits.maxCostUsd !== null)
     return invalid('This agent provider cannot reserve a currency budget. Use a token budget with maxCostUsd set to null.')
   const used = context.run.usage.inputTokens + context.run.usage.outputTokens + localUsage.inputTokens + localUsage.outputTokens
-  const inputReserve = turns.reduce((total, turn) => total + inputTokenCeiling(turn), 0)
+  const inputReserve = turns.reduce((total, turn) => total + inputTokenCeiling(turn, inputTokenOverhead.value), 0)
   const remaining = context.run.definition.limits.maxTokens - used - inputReserve
   const outputPerTurn = Math.floor(remaining / turns.length)
   if (outputPerTurn < 128)
@@ -118,7 +120,7 @@ async function reserveTurns(context: TaskContext, turns: PlannedTurn[], localUsa
   const reserved: ReservedTurn[] = []
   for (const turn of turns) {
     const request = { ...turn, maxOutputTokens: Math.min(turn.maxOutputTokens, outputPerTurn), signal: context.signal }
-    const reservation = await context.reserveUsage({ inputTokens: inputTokenCeiling(turn), outputTokens: request.maxOutputTokens, costUsd: null })
+    const reservation = await context.reserveUsage({ inputTokens: inputTokenCeiling(turn, inputTokenOverhead.value), outputTokens: request.maxOutputTokens, costUsd: null })
     if (reservation._tag === 'Err') {
       // No provider was invoked. These reservations have positively known zero usage.
       for (const unused of reserved) {
@@ -148,8 +150,8 @@ async function generateReservedTurn(context: TaskContext, provider: AgentProvide
   return response
 }
 
-async function generateTurn(context: TaskContext, provider: AgentProvider, turn: PlannedTurn): Promise<Result<AgentResponse>> {
-  const reserved = await reserveTurns(context, [turn], zeroUsage())
+async function generateTurn(context: TaskContext, provider: AgentProvider, turn: PlannedTurn, inputTokenOverhead: Result<number>): Promise<Result<AgentResponse>> {
+  const reserved = await reserveTurns(context, [turn], zeroUsage(), inputTokenOverhead)
   return reserved._tag === 'Err' ? reserved : generateReservedTurn(context, provider, reserved.value[0]!)
 }
 
@@ -444,7 +446,9 @@ function parseConversation(value: unknown): Result<ConversationInput> {
   return ok({ conversation: { commentId: conversation.commentId, question: conversation.question, reviewedHeadSha: (conversation.reviewedHeadSha as string | null | undefined) ?? null, finding: (conversation.finding as JsonValue | undefined) ?? null, history: history as ConversationInput['conversation']['history'] } })
 }
 
-function conversationTurn(context: TaskContext, conversation: ConversationInput['conversation'], selected: ReviewSelection, preferredPath: string | null): Result<PlannedTurn> {
+function conversationTurn(context: TaskContext, conversation: ConversationInput['conversation'], selected: ReviewSelection, preferredPath: string | null, inputTokenOverhead: Result<number>): Result<PlannedTurn> {
+  if (inputTokenOverhead._tag === 'Err')
+    return inputTokenOverhead
   const current = structuredClone(selected)
   const history = [...conversation.history]
   let omittedHistoryMessages = 0
@@ -454,11 +458,11 @@ function conversationTurn(context: TaskContext, conversation: ConversationInput[
   const turn = (): PlannedTurn => ({ messages: [system, { role: 'user', content: JSON.stringify({ ...conversation, history, current, omittedHistoryMessages, omittedBodyCharacters, omittedTitleCharacters }) }], maxOutputTokens: 2048 })
   const remaining = context.run.definition.limits.maxTokens - context.run.usage.inputTokens - context.run.usage.outputTokens
   const mandatory: PlannedTurn = { messages: [system, { role: 'user', content: JSON.stringify({ ...conversation, history: [], current: { ...selected, title: '', body: '', files: [], coverage: 'incomplete', omittedFiles: selected.omittedFiles + selected.files.length }, omittedHistoryMessages: conversation.history.length, omittedBodyCharacters: selected.body.length, omittedTitleCharacters: selected.title.length }) }], maxOutputTokens: 128 }
-  const mandatoryTokens = inputTokenCeiling(mandatory)
+  const mandatoryTokens = inputTokenCeiling(mandatory, inputTokenOverhead.value)
   if (mandatoryTokens + 128 > remaining)
     return invalid('The question and finding exceed this conversation budget. Shorten the question or finding before retrying.')
   const maxOutputTokens = Math.min(2048, remaining - mandatoryTokens)
-  while (inputTokenCeiling(turn()) + maxOutputTokens > remaining) {
+  while (inputTokenCeiling(turn(), inputTokenOverhead.value) + maxOutputTokens > remaining) {
     const unrelated = current.files.findLastIndex(file => file.path !== preferredPath)
     if (unrelated >= 0) {
       current.files.splice(unrelated, 1)
@@ -479,7 +483,7 @@ function conversationTurn(context: TaskContext, conversation: ConversationInput[
     }
     else if (current.files.some(file => file.patch)) {
       const file = current.files.find(file => file.patch)!
-      const overflow = inputTokenCeiling(turn()) + maxOutputTokens - remaining
+      const overflow = inputTokenCeiling(turn(), inputTokenOverhead.value) + maxOutputTokens - remaining
       const bytes = Buffer.from(file.patch!, 'utf8')
       const clipped = new TextDecoder().decode(bytes.subarray(0, Math.max(0, bytes.length - overflow - 64)), { stream: true })
       const newline = clipped.lastIndexOf('\n')
@@ -521,6 +525,8 @@ function parseSummary(value: unknown): Result<{ text: string, headSha: string }>
 }
 
 export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskType[] {
+  const overhead = dependencies.provider.inputTokenOverhead === undefined ? 256 : dependencies.provider.inputTokenOverhead
+  const inputTokenOverhead = integer(overhead, 0, 65_536) ? ok(overhead) : invalid('Agent provider input token overhead must be an integer from 0 to 65536.')
   const snapshot = makeTask('review.snapshot', ['repository:read'], parseScope, outputParser(parseSelection), async (context, input) => {
     const selected = await selectSnapshot(dependencies, context, input)
     return selected._tag === 'Err' ? { _tag: 'Failed', error: selected.error } : { _tag: 'Succeeded', output: json(selected.value) }
@@ -539,7 +545,7 @@ export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskTyp
           { role: 'user', content: JSON.stringify(input.snapshot) },
         ],
         maxOutputTokens: input.maxOutputTokens,
-      })), usage)
+      })), usage, inputTokenOverhead)
       if (planned._tag === 'Err')
         return { _tag: 'Failed', error: planned.error, usage }
       const results = await Promise.all(planned.value.map(async (request, index) => ({ role: roles[index]!, result: await generateReservedTurn(context, dependencies.provider, request) })))
@@ -579,7 +585,7 @@ export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskTyp
           { role: 'user', content: JSON.stringify({ snapshot: input.snapshot, findings }) },
         ],
         maxOutputTokens: 2048,
-      })
+      }, inputTokenOverhead)
       if (response._tag === 'Err')
         return { _tag: 'Failed', error: response.error, usage: failureUsage(response.error) }
       usage = response.value.usage
@@ -644,10 +650,10 @@ export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskTyp
     const selected = await selectSnapshot(dependencies, context, { maxFiles: 40, maxCharacters: 60_000, full: true }, preferred)
     if (selected._tag === 'Err')
       return { _tag: 'Failed', error: selected.error }
-    const planned = conversationTurn(context, conversation, selected.value, preferred?.path ?? null)
+    const planned = conversationTurn(context, conversation, selected.value, preferred?.path ?? null, inputTokenOverhead)
     if (planned._tag === 'Err')
       return { _tag: 'Failed', error: planned.error }
-    const response = await generateTurn(context, dependencies.provider, planned.value)
+    const response = await generateTurn(context, dependencies.provider, planned.value, inputTokenOverhead)
     if (response._tag === 'Err')
       return { _tag: 'Failed', error: response.error, usage: failureUsage(response.error) }
     if (!response.value.text.trim() || response.value.text.length > 12_000)
@@ -681,7 +687,7 @@ export function createReviewTaskTypes(dependencies: ReviewDependencies): TaskTyp
     const response = await generateTurn(context, dependencies.provider, { messages: [
       { role: 'system', content: `${inertInstructions}\nWrite a concise release summary from these changed files. Describe behavior supported by the patches. State when the scope is incomplete. Return plain Markdown, at most 200 words.` },
       { role: 'user', content: JSON.stringify(changes) },
-    ], maxOutputTokens: 1024 })
+    ], maxOutputTokens: 1024 }, inputTokenOverhead)
     if (response._tag === 'Err')
       return { _tag: 'Failed', error: response.error, usage: failureUsage(response.error) }
     const summary = parseSummary({ text: response.value.text, headSha: changes.headSha })
