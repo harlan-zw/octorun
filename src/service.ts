@@ -59,13 +59,13 @@ export interface OctorunServiceOptions {
 export async function createOctorun(options: OctorunServiceOptions) {
   const { config } = options
   const now = options.now ?? (() => new Date())
-  const secrets = resolveSecrets(config, options.env ?? process.env)
+  const secrets = resolveSecrets(config, options.env ?? process.env, { requireProvider: options.provider === undefined })
   if (secrets._tag === 'Err')
     return secrets
   const appId = Number(config.github.appId)
   if (!githubId(appId))
     return err({ _tag: 'Configuration', message: 'The GitHub App ID must be a positive safe integer.' })
-  const provider = options.provider ? ok(options.provider) : createOpenAICompatibleProvider({ ...config.provider, apiKey: secrets.value.apiKey }, { ...(options.fetch ? { fetch: options.fetch } : {}), now })
+  const provider = options.provider ? ok(options.provider) : createOpenAICompatibleProvider({ ...config.provider, apiKey: secrets.value.apiKey ?? '' }, { ...(options.fetch ? { fetch: options.fetch } : {}), now })
   if (provider._tag === 'Err')
     return provider
   const client = options.client ?? createGitHubClient({ auth: createGitHubAppAuth({ appId, privateKey: secrets.value.privateKey, apiUrl: config.github.apiUrl, now: () => now().getTime(), ...(options.fetch ? { fetch: options.fetch } : {}) }), apiUrl: config.github.apiUrl, now: () => now().getTime(), ...(options.fetch ? { fetch: options.fetch } : {}) })
