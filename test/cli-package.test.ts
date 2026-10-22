@@ -2,7 +2,7 @@ import type { ChildProcess } from 'node:child_process'
 import { execFile, spawn } from 'node:child_process'
 import { createHmac } from 'node:crypto'
 import { once } from 'node:events'
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:https'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -43,7 +43,7 @@ async function stop(child: ChildProcess): Promise<void> {
   clearTimeout(timeout)
 }
 
-it('runs the production tarball from a clean home through GitHub, restart, and finding conversation', async () => {
+it.each(['http', 'claude'] as const)('runs the production tarball with %s from a clean home through GitHub, restart, and finding conversation', async (selectedProvider) => {
   const root = await mkdtemp(join(tmpdir(), 'octorun-package-'))
   const installation = join(root, 'installation')
   const home = join(root, 'home')
@@ -52,6 +52,11 @@ it('runs the production tarball from a clean home through GitHub, restart, and f
   const cert = join(root, 'localhost.crt')
   const key = join(root, 'localhost.key')
   await Promise.all([mkdir(installation), mkdir(home), mkdir(configHome), mkdir(stateHome)])
+  const claude = join(home, 'claude.ts')
+  const claudeCalls = join(home, 'claude-calls')
+  await copyFile(new URL('./fixtures/claude-package.ts', import.meta.url), claude)
+  await chmod(claude, 0o700)
+  await writeFile(claudeCalls, '')
   const processes = new Set<ChildProcess>()
   const errors: string[] = []
   const comments: Record<string, unknown>[] = []
@@ -171,7 +176,8 @@ it('runs the production tarball from a clean home through GitHub, restart, and f
     throw new Error('Mock HTTPS server did not start.')
   const apiUrl = `https://127.0.0.1:${address.port}`
   const configPath = join(configHome, 'octorun', 'config.yaml')
-  const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, NODE_EXTRA_CA_CERTS: cert, APP_KEY: await readFile(key, 'utf8'), API_KEY: 'synthetic-provider-key', WEBHOOK_SECRET: webhookSecret, OCTORUN_GITHUB_PRIVATE_KEY: await readFile(key, 'utf8'), OCTORUN_API_KEY: 'synthetic-provider-key', OCTORUN_WEBHOOK_SECRET: webhookSecret }
+  const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, NODE_EXTRA_CA_CERTS: cert, APP_KEY: await readFile(key, 'utf8'), API_KEY: 'synthetic-provider-key', WEBHOOK_SECRET: webhookSecret, OCTORUN_GITHUB_PRIVATE_KEY: await readFile(key, 'utf8'), OCTORUN_API_KEY: selectedProvider === 'http' ? 'synthetic-provider-key' : undefined, OCTORUN_WEBHOOK_SECRET: webhookSecret }
+  const paidCalls = async () => selectedProvider === 'http' ? providerCalls : (await readFile(claudeCalls, 'utf8')).trim().split('\n').filter(Boolean).length
   const cliPath = join(installation, 'node_modules', '@harlan-zw', 'octorun', 'dist', 'cli.mjs')
   const cli = async (...args: string[]) => {
     const result = await execute(process.execPath, [cliPath, '--json', ...args], { cwd: installation, env: environment, timeout: 60000, maxBuffer: 8 * 1024 * 1024 })
@@ -207,15 +213,16 @@ it('runs the production tarball from a clean home through GitHub, restart, and f
     await execute('pnpm', ['--ignore-workspace', 'add', '--prod', '--ignore-scripts', '--ignore-pnpmfile', '--reporter=append-only', tarball], { cwd: installation, env: { ...environment, CI: 'true' }, timeout: 120000, maxBuffer: 4 * 1024 * 1024 })
     const installedBin = await execute('pnpm', ['--ignore-workspace', 'exec', 'octorun', '--json', 'version'], { cwd: installation, env: environment, timeout: 10000 })
     expect(JSON.parse(installedBin.stdout).node).toBe(process.version)
-    await cli('init', '--repository', 'acme/project', '--repository-id', '10', '--installation-id', '20', '--app-id', '7', '--model', 'test-model')
+    await cli('init', '--repository', 'acme/project', '--repository-id', '10', '--installation-id', '20', '--app-id', '7', '--provider', selectedProvider, '--model', 'test-model')
     const config = parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
     Object.assign(config.github as Record<string, unknown>, { apiUrl })
-    Object.assign(config.provider as Record<string, unknown>, { baseUrl: `${apiUrl}/v1` })
+    Object.assign(config.provider as Record<string, unknown>, selectedProvider === 'http' ? { baseUrl: `${apiUrl}/v1` } : { command: claude })
     config.pollIntervalMs = 0
     config.port = 0
     await writeFile(configPath, stringify(config))
     expect((await cli('config', 'validate')).valid).toBe(true)
     expect((await cli('doctor', '--online')).ready).toBe(true)
+    expect(await paidCalls()).toBe(0)
     await copyFile(join(installation, 'node_modules', '@harlan-zw', 'octorun', 'examples', 'custom-task.ts'), join(installation, 'custom-task.ts'))
     const example = await execute(process.execPath, ['--experimental-strip-types', join(installation, 'custom-task.ts')], { cwd: installation, env: environment, timeout: 10000 })
     expect(JSON.parse(example.stdout)).toMatchObject({ state: { _tag: 'Succeeded' }, output: { repository: 'example/project' } })
@@ -234,14 +241,14 @@ it('runs the production tarball from a clean home through GitHub, restart, and f
     expect(completed.targetKey).toBe('10:pull_request:1')
     expect(reviews).toHaveLength(1)
     expect(reviewComments).toHaveLength(1)
-    expect(providerCalls).toBe(3)
+    expect(await paidCalls()).toBe(3)
     const finding = reviewComments[0]!
     const question = { action: 'created', repository, installation: { id: 20 }, sender: actor, pull_request: { number: 1 }, comment: { id: 999, body: 'Why does this fail?', in_reply_to_id: finding.id, user: actor, created_at: new Date().toISOString(), updated_at: new Date().toISOString() } }
     expect((await webhook(second.url, 'pull_request_review_comment', question, 'conversation-delivery')).status).toBe(202)
     await until(async () => reviewComments.length === 2 ? true : null)
     expect(reviewComments[1]).toMatchObject({ in_reply_to_id: finding.id, body: expect.stringContaining('missing account') })
     expect(reviews).toHaveLength(1)
-    expect(providerCalls).toBe(4)
+    expect(await paidCalls()).toBe(4)
     expect(comments).toHaveLength(1)
     expect(checkRuns.every(check => check.status === 'completed')).toBe(true)
     const backup = join(root, 'backup.sqlite')

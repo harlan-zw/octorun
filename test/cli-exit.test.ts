@@ -17,7 +17,7 @@ async function executeCommand(command: 'run' | 'cancel' | 'doctor', state: strin
     version: 1,
     stateDir,
     github: { appId: '1', privateKeyEnv: 'TEST_APP_KEY', webhookSecretEnv: 'TEST_HOOK_KEY' },
-    provider: { baseUrl: 'http://localhost:1234/v1', model: 'test-model', apiKeyEnv: 'TEST_MODEL_KEY' },
+    provider: { _tag: 'OpenAICompatible', baseUrl: 'http://localhost:1234/v1', model: 'test-model', apiKeyEnv: 'TEST_MODEL_KEY' },
     repositories: [{ id: 1, fullName: 'example/project', installationId: 2 }],
   }))
   const controller = await startControlServer({ path: join(stateDir, 'control.sock'), handle: async () => ({ _tag: 'Ok', value: command === 'doctor' ? { ready: state === 'Succeeded' } : { runId: 'example-run', state } }) })

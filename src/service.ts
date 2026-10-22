@@ -11,7 +11,7 @@ import { resolveSecrets } from './config.ts'
 import { githubId, githubObject } from './github-auth.ts'
 import { isOctorunFinding } from './github-publication.ts'
 import { authorizeGitHubCommand, createGitHubAppAuth, createGitHubClient, createGitHubPublisher, createGitHubSnapshotReader, githubDigest, githubRepositoryPath, normalizeGitHubWebhook, parseGitHubCommand, pollGitHubEvents, verifyWebhookSignature } from './github.ts'
-import { createOpenAICompatibleProvider } from './providers.ts'
+import { checkClaudeAuthentication, createClaudeProvider, createOpenAICompatibleProvider, withClaudeReadiness } from './providers.ts'
 import { adversarialReviewPreset, changeSummaryPreset, conversationPreset, createReviewTaskTypes } from './review.ts'
 import { createRunner } from './runner.ts'
 import { openStore } from './store.ts'
@@ -60,14 +60,19 @@ export interface OctorunServiceOptions {
 
 export async function createOctorun(options: OctorunServiceOptions) {
   const { config } = options
+  const environment = { ...(options.env ?? process.env) }
   const now = options.now ?? (() => new Date())
-  const secrets = resolveSecrets(config, options.env ?? process.env, { requireProvider: options.provider === undefined })
+  const secrets = resolveSecrets(config, environment, { requireProvider: options.provider === undefined })
   if (secrets._tag === 'Err')
     return secrets
   const appId = Number(config.github.appId)
   if (!githubId(appId))
     return err({ _tag: 'Configuration', message: 'The GitHub App ID must be a positive safe integer.' })
-  const provider = options.provider ? ok(options.provider) : createOpenAICompatibleProvider({ ...config.provider, apiKey: secrets.value.apiKey ?? '' }, { ...(options.fetch ? { fetch: options.fetch } : {}), now })
+  const provider = options.provider
+    ? ok(options.provider)
+    : config.provider._tag === 'Claude'
+      ? ok(createClaudeProvider({ ...config.provider, stateDir: config.stateDir, env: environment }))
+      : createOpenAICompatibleProvider({ ...config.provider, apiKey: secrets.value.apiKey ?? '' }, { ...(options.fetch ? { fetch: options.fetch } : {}), now })
   if (provider._tag === 'Err')
     return provider
   const client = options.client ?? createGitHubClient({ auth: createGitHubAppAuth({ appId, privateKey: secrets.value.privateKey, apiUrl: config.github.apiUrl, now: () => now().getTime(), ...(options.fetch ? { fetch: options.fetch } : {}) }), apiUrl: config.github.apiUrl, now: () => now().getTime(), ...(options.fetch ? { fetch: options.fetch } : {}) })
@@ -117,7 +122,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
     const report = githubObject(output)
     return report && typeof report.headSha === 'string' && typeof report.baseSha === 'string' && Array.isArray(report.fingerprints) && report.fingerprints.every(value => typeof value === 'string') ? { headSha: report.headSha, baseSha: report.baseSha, fingerprints: report.fingerprints as string[] } : null
   } })
-  const providerBinding = digest({ id: provider.value.id, inputTokenOverhead: provider.value.inputTokenOverhead ?? 256, baseUrl: config.provider.baseUrl, model: config.provider.model, timeoutMs: config.provider.timeoutMs, maxResponseBytes: config.provider.maxResponseBytes, maxInputCharacters: config.provider.maxInputCharacters })
+  const providerBinding = digest({ id: provider.value.id, inputTokenOverhead: provider.value.inputTokenOverhead ?? 256, configuration: config.provider })
   const pinnedReviewTypes = reviewTypes.map(type => type.capabilities.includes('agent:invoke') ? { ...type, version: `${type.version}:${providerBinding}` } : type)
   const currentPolicy = async (run: RunRecord, resultPublication = false): Promise<Result<RepositoryPolicy>> => {
     const repository = configured(run.event.repository.fullName)
@@ -601,7 +606,10 @@ export async function createOctorun(options: OctorunServiceOptions) {
         const result = await definitions(repository)
         results.push({ repository: repository.fullName, ok: result._tag === 'Ok', error: result._tag === 'Err' ? result.error.message : null })
       }
-      return ok({ ready: results.every(result => githubObject(result)?.ok === true), repositories: results, provider: { model: config.provider.model, configured: true }, webhook: secrets.value.webhookSecret !== null })
+      const diagnostic = ok({ ready: results.every(result => githubObject(result)?.ok === true), repositories: results, provider: { kind: options.provider ? 'Injected' : config.provider._tag, model: config.provider.model, configured: true, authentication: 'not-checked' }, webhook: secrets.value.webhookSecret !== null })
+      return config.provider._tag === 'Claude' && !options.provider
+        ? withClaudeReadiness(diagnostic, await checkClaudeAuthentication({ command: config.provider.command, env: environment }))
+        : diagnostic
     }
     return err({ _tag: 'Configuration', message: 'The local control command is unknown.' })
   }

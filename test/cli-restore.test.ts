@@ -16,7 +16,7 @@ it.each(['corrupt', 'newer-schema'])('reports safe recovery steps for a %s resto
     version: 1,
     stateDir: join(root, 'state'),
     github: { appId: '1', privateKeyEnv: 'TEST_APP_KEY', webhookSecretEnv: 'TEST_HOOK_KEY' },
-    provider: { baseUrl: 'http://localhost:1234/v1', model: 'test-model', apiKeyEnv: 'TEST_MODEL_KEY' },
+    provider: { _tag: 'OpenAICompatible', baseUrl: 'http://localhost:1234/v1', model: 'test-model', apiKeyEnv: 'TEST_MODEL_KEY' },
     repositories: [{ id: 1, fullName: 'example/project', installationId: 2 }],
   }))
   if (kind === 'corrupt') {

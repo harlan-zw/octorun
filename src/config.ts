@@ -17,6 +17,14 @@ export interface ConfiguredRepository extends RepositoryRef {
   workflowSource: WorkflowSource
 }
 
+export type ProviderConfiguration
+  = | { _tag: 'OpenAICompatible', baseUrl: string, model: string, apiKeyEnv: string, timeoutMs: number, maxResponseBytes: number, maxInputCharacters: number }
+    | { _tag: 'Claude', model: string, command: string, timeoutMs: number, maxResponseBytes: number, maxInputBytes: number }
+
+export type InitialProviderConfiguration
+  = | { _tag: 'OpenAICompatible', model: string, baseUrl?: string }
+    | { _tag: 'Claude', model: string }
+
 export interface OperatorConfig {
   version: 1
   stateDir: string
@@ -24,7 +32,7 @@ export interface OperatorConfig {
   port: number
   handle: string
   github: { appId: string, privateKeyEnv: string, webhookSecretEnv: string, apiUrl: string }
-  provider: { baseUrl: string, model: string, apiKeyEnv: string, timeoutMs: number, maxResponseBytes: number, maxInputCharacters: number }
+  provider: ProviderConfiguration
   repositories: ConfiguredRepository[]
   pollIntervalMs: number
   limits: { bodyBytes: number, requestsPerMinute: number, concurrency: number }
@@ -122,6 +130,40 @@ function parseRepository(value: unknown): Result<ConfiguredRepository> {
   })
 }
 
+function parseProvider(provider: unknown): Result<ProviderConfiguration> {
+  if (!record(provider) || typeof provider._tag !== 'string' || !['OpenAICompatible', 'Claude'].includes(provider._tag))
+    return invalid('provider._tag must select OpenAICompatible or Claude.')
+  const shared = ['_tag', 'model', 'timeoutMs', 'maxResponseBytes']
+  const unknown = keys(provider, [...shared, ...(provider._tag === 'Claude' ? ['command', 'maxInputBytes'] : ['baseUrl', 'apiKeyEnv', 'maxInputCharacters'])])
+  if (unknown)
+    return invalid(`Unknown provider setting: ${unknown}. Use settings for the selected provider.`)
+  const model = provider.model ?? (provider._tag === 'Claude' ? 'claude-opus-5-5' : undefined)
+  const timeoutMs = provider.timeoutMs ?? (provider._tag === 'Claude' ? 180000 : 120000)
+  const maxResponseBytes = provider.maxResponseBytes ?? 2097152
+  if (!text(model) || !model.trim() || model.length > 200)
+    return invalid('provider.model must name a model with at most 200 characters.')
+  if (!integer(timeoutMs, 100, 900000) || !integer(maxResponseBytes, 1024, 4194304))
+    return invalid('Provider limits exceed the supported timeout or response bounds.')
+  if (provider._tag === 'Claude') {
+    const command = provider.command ?? 'claude'
+    const maxInputBytes = provider.maxInputBytes ?? 262144
+    if (!text(command) || command.includes('\0') || (/[/\\]/.test(command) && !isAbsolute(command)) || !/^\w[\w.:/-]{0,199}$/.test(model))
+      return invalid('Claude needs a valid executable and model.')
+    if (!integer(maxInputBytes, 1024, 1048576))
+      return invalid('Claude input limits must be between 1024 and 1048576 bytes.')
+    return ok({ _tag: 'Claude', model, command, timeoutMs, maxResponseBytes, maxInputBytes })
+  }
+  const baseUrl = parseUrl(provider.baseUrl)
+  if (!baseUrl || (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(baseUrl.hostname))) || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash)
+    return invalid('provider.baseUrl must use HTTPS, or HTTP on localhost, without credentials or query parameters.')
+  if (!envName(provider.apiKeyEnv))
+    return invalid('provider.apiKeyEnv must name an environment variable.')
+  const maxInputCharacters = provider.maxInputCharacters ?? 200000
+  if (!integer(maxInputCharacters, 1024, 1048576))
+    return invalid('Provider limits exceed the supported input bounds.')
+  return ok({ _tag: 'OpenAICompatible', baseUrl: baseUrl.href.replace(/\/$/, ''), model, apiKeyEnv: provider.apiKeyEnv, timeoutMs, maxResponseBytes, maxInputCharacters })
+}
+
 export function parseConfig(input: unknown, context: ConfigContext): Result<OperatorConfig> {
   if (!record(input))
     return invalid('Configuration must be an object.')
@@ -144,22 +186,9 @@ export function parseConfig(input: unknown, context: ConfigContext): Result<Oper
   const parsedApi = parseUrl(apiUrl)
   if (!parsedApi || parsedApi.protocol !== 'https:' || parsedApi.username || parsedApi.password || parsedApi.search || parsedApi.hash)
     return invalid('github.apiUrl must use HTTPS without credentials or query parameters.')
-  const provider = input.provider
-  if (!record(provider))
-    return invalid('provider must define baseUrl, model, and apiKeyEnv.')
-  const providerUnknown = keys(provider, ['baseUrl', 'model', 'apiKeyEnv', 'timeoutMs', 'maxResponseBytes', 'maxInputCharacters'])
-  if (providerUnknown)
-    return invalid(`Unknown provider setting: ${providerUnknown}. Store secrets in environment variables.`)
-  const baseUrl = parseUrl(provider.baseUrl)
-  if (!baseUrl || (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(baseUrl.hostname))) || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash)
-    return invalid('provider.baseUrl must use HTTPS, or HTTP on localhost, without credentials or query parameters.')
-  if (!text(provider.model) || !provider.model.trim() || provider.model.length > 200 || !envName(provider.apiKeyEnv))
-    return invalid('provider needs a model and an apiKeyEnv environment reference.')
-  const timeoutMs = provider.timeoutMs ?? 120000
-  const maxResponseBytes = provider.maxResponseBytes ?? 2097152
-  const maxInputCharacters = provider.maxInputCharacters ?? 200000
-  if (!integer(timeoutMs, 100, 900000) || !integer(maxResponseBytes, 1024, 4194304) || !integer(maxInputCharacters, 1024, 1048576))
-    return invalid('Provider limits exceed the supported timeout or response bounds.')
+  const provider = parseProvider(input.provider)
+  if (provider._tag === 'Err')
+    return provider
   const host = input.host ?? '127.0.0.1'
   const port = input.port ?? 3333
   const handle = input.handle ?? 'octorun'
@@ -203,7 +232,7 @@ export function parseConfig(input: unknown, context: ConfigContext): Result<Oper
     port,
     handle,
     github: { appId: github.appId, privateKeyEnv: github.privateKeyEnv, webhookSecretEnv: github.webhookSecretEnv, apiUrl: parsedApi.href.replace(/\/$/, '') },
-    provider: { baseUrl: baseUrl.href.replace(/\/$/, ''), model: provider.model, apiKeyEnv: provider.apiKeyEnv, timeoutMs, maxResponseBytes, maxInputCharacters },
+    provider: provider.value,
     repositories,
     pollIntervalMs,
     limits: { bodyBytes, requestsPerMinute, concurrency },
@@ -232,7 +261,7 @@ export async function readConfig(options: { path?: string, env?: NodeJS.ProcessE
 
 export function resolveSecrets(config: OperatorConfig, env: NodeJS.ProcessEnv = process.env, options: { requireWebhook?: boolean, requireProvider?: boolean } = {}): Result<SecretValues> {
   const references = [config.github.privateKeyEnv]
-  if (options.requireProvider !== false)
+  if (options.requireProvider !== false && config.provider._tag === 'OpenAICompatible')
     references.push(config.provider.apiKeyEnv)
   if (options.requireWebhook)
     references.push(config.github.webhookSecretEnv)
@@ -243,14 +272,14 @@ export function resolveSecrets(config: OperatorConfig, env: NodeJS.ProcessEnv = 
   const webhookSecret = env[config.github.webhookSecretEnv]?.trim() || null
   if (webhookSecret !== null && webhookSecret.length < 16)
     return invalid(`Set ${config.github.webhookSecretEnv} to at least 16 characters.`)
-  return ok({ privateKey: env[config.github.privateKeyEnv]!, apiKey: options.requireProvider === false ? null : env[config.provider.apiKeyEnv]!, webhookSecret })
+  return ok({ privateKey: env[config.github.privateKeyEnv]!, apiKey: options.requireProvider === false || config.provider._tag === 'Claude' ? null : env[config.provider.apiKeyEnv]!, webhookSecret })
 }
 
-export async function initConfig(options: { path: string, repository: string, repositoryId: number, installationId: number, appId: string, model: string, baseUrl?: string }): Promise<Result<{ path: string }>> {
+export async function initConfig(options: { path: string, repository: string, repositoryId: number, installationId: number, appId: string, provider: InitialProviderConfiguration }): Promise<Result<{ path: string }>> {
   const raw = {
     version: 1,
     github: { appId: options.appId, privateKeyEnv: 'OCTORUN_GITHUB_PRIVATE_KEY', webhookSecretEnv: 'OCTORUN_WEBHOOK_SECRET' },
-    provider: { baseUrl: options.baseUrl ?? 'https://api.openai.com/v1', model: options.model, apiKeyEnv: 'OCTORUN_API_KEY' },
+    provider: options.provider._tag === 'Claude' ? options.provider : { _tag: 'OpenAICompatible', baseUrl: options.provider.baseUrl ?? 'https://api.openai.com/v1', model: options.provider.model, apiKeyEnv: 'OCTORUN_API_KEY' },
     repositories: [{ id: options.repositoryId, fullName: options.repository, installationId: options.installationId }],
   }
   const parsed = parseConfig(raw, { configDir: dirname(resolve(options.path)) })
