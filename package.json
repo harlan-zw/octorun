@@ -45,7 +45,8 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "obuild",
+    "build": "obuild && pnpm check:consumer",
+    "check:consumer": "tsc --project tsconfig.consumer.json",
     "dev": "node --experimental-strip-types src/cli.ts",
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit",
