@@ -1,0 +1,77 @@
+{
+  "name": "@harlan-zw/octorun",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Run reactive GitHub workflows with your own agent provider.",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./config": {
+      "types": "./dist/config.d.mts",
+      "import": "./dist/config.mjs"
+    },
+    "./server": {
+      "types": "./dist/server.d.mts",
+      "import": "./dist/server.mjs"
+    },
+    "./github": {
+      "types": "./dist/github.d.mts",
+      "import": "./dist/github.mjs"
+    },
+    "./review": {
+      "types": "./dist/review.d.mts",
+      "import": "./dist/review.mjs"
+    },
+    "./providers": {
+      "types": "./dist/providers.d.mts",
+      "import": "./dist/providers.mjs"
+    }
+  },
+  "bin": {
+    "octorun": "./dist/cli.mjs"
+  },
+  "files": [
+    "GLOSSARY.md",
+    "LICENSE.md",
+    "README.md",
+    "dist",
+    "docs",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "obuild",
+    "dev": "node --experimental-strip-types src/cli.ts",
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "prepack": "pnpm build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test:run && pnpm build",
+    "export": "node --experimental-strip-types scripts/export.ts"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "obuild": "0.4.45",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3",
+    "eslint": "10.12.0",
+    "@antfu/eslint-config": "9.5.1"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harlan-zw/octorun.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
