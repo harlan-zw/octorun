@@ -54,6 +54,8 @@ export interface OctorunServiceOptions {
   client?: GitHubClient
   provider?: AgentProvider
   taskTypes?: TaskType[]
+  /** Recheck host-owned authority before execution, paid turns, and result publication. */
+  authorizeRun?: (run: RunRecord) => Promise<Result<void>>
 }
 
 export async function createOctorun(options: OctorunServiceOptions) {
@@ -81,6 +83,8 @@ export async function createOctorun(options: OctorunServiceOptions) {
       return metadata
     if (metadata.value.ref.id !== repository.id || metadata.value.ref.installationId !== repository.installationId)
       return err({ _tag: 'Authorization', message: 'The installed repository does not match the operator configuration.' })
+    if (metadata.value.archived)
+      return err({ _tag: 'Authorization', message: 'The repository is archived.' })
     if (repository.workflowSource._tag === 'Repository') {
       const source = await client.readWorkflow(repository.fullName, repository.workflowSource.path, signal)
       if (source._tag === 'Err')
@@ -115,15 +119,25 @@ export async function createOctorun(options: OctorunServiceOptions) {
   } })
   const providerBinding = digest({ id: provider.value.id, inputTokenOverhead: provider.value.inputTokenOverhead ?? 256, baseUrl: config.provider.baseUrl, model: config.provider.model, timeoutMs: config.provider.timeoutMs, maxResponseBytes: config.provider.maxResponseBytes, maxInputCharacters: config.provider.maxInputCharacters })
   const pinnedReviewTypes = reviewTypes.map(type => type.capabilities.includes('agent:invoke') ? { ...type, version: `${type.version}:${providerBinding}` } : type)
-  const currentPolicy = async (run: RunRecord): Promise<Result<RepositoryPolicy>> => {
+  const currentPolicy = async (run: RunRecord, resultPublication = false): Promise<Result<RepositoryPolicy>> => {
     const repository = configured(run.event.repository.fullName)
     if (repository._tag === 'Err')
       return repository
     const metadata = await client.repository(repository.value.fullName)
     if (metadata._tag === 'Err')
       return metadata
-    if (metadata.value.ref.id !== run.event.repository.id || metadata.value.ref.installationId !== run.event.repository.installationId)
+    if (repository.value.id !== run.event.repository.id || repository.value.installationId !== run.event.repository.installationId
+      || metadata.value.ref.id !== repository.value.id || metadata.value.ref.installationId !== repository.value.installationId) {
       return err({ _tag: 'Authorization', message: 'The workflow repository installation changed.' })
+    }
+    if (metadata.value.archived)
+      return err({ _tag: 'Authorization', message: 'The repository is archived.' })
+    // Terminal check updates must report revocation. Result publication still requires the host grant.
+    if (options.authorizeRun && (resultPublication || ['Queued', 'Running', 'Waiting'].includes(run.state._tag))) {
+      const authority = await options.authorizeRun(run)
+      if (authority._tag === 'Err')
+        return authority
+    }
     if (['Queued', 'Running', 'Waiting'].includes(run.state._tag) && run.event.target._tag === 'PullRequest'
       && run.tasks.some(task => taskTypes.some(type => type.id === task.definition.uses && type.capabilities.includes('agent:invoke')))) {
       const current = await client.snapshot(repository.value.fullName, run.event.target.number)
@@ -146,6 +160,8 @@ export async function createOctorun(options: OctorunServiceOptions) {
     const repository = configured(context.run.event.repository.fullName)
     if (repository._tag === 'Err')
       return repository
+    if (repository.value.id !== context.run.event.repository.id || repository.value.installationId !== context.run.event.repository.installationId)
+      return err({ _tag: 'Authorization', message: 'The workflow repository installation changed.' })
     const capability = context.publication.effect._tag === 'Review' ? 'github:review' : context.publication.effect._tag === 'Check' ? 'github:check' : 'github:comment'
     if (!repository.value.policy.enabled || !repository.value.policy.capabilities.includes(capability) || !context.run.policy.capabilities.includes(capability))
       return err({ _tag: 'Authorization', message: 'Repository policy no longer permits this GitHub publication.' })
@@ -153,7 +169,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
     if (!current || (['Cancelled', 'Superseded'].includes(current.state._tag) && context.publication.effect._tag !== 'Check'))
       return err({ _tag: 'Authorization', message: 'The workflow run no longer permits this publication.' })
     if (context.publication.effect._tag !== 'Check') {
-      const grant = await currentPolicy(context.run)
+      const grant = await currentPolicy(context.run, true)
       if (grant._tag === 'Err')
         return grant
     }
