@@ -2,7 +2,8 @@
 
 Use a Linux host with Node.js 24 or newer.
 Install the Octorun tarball using the [README instructions](../../README.md#setup).
-You need a GitHub App, one installed repository, and an agent provider key.
+You need a GitHub App, one installed repository, and an agent provider.
+Choose an HTTP provider key or an existing Claude Code login.
 
 ## Configure the App
 
@@ -42,6 +43,24 @@ octorun init --repository your-org/your-repository \
   --model your-provider-model
 ```
 
+The default selection is the HTTP provider.
+For Claude Code, install the CLI and sign in on the controller host with `claude auth login`.
+Create the configuration with:
+
+```bash
+octorun init --repository your-org/your-repository \
+  --repository-id 456 --installation-id 789 --app-id 123 \
+  --provider claude
+```
+
+Claude defaults to `claude-opus-5-5`.
+Use `--model` to choose another model.
+The adapter uses the existing login and requires no API key or endpoint.
+It disables tools, MCP servers, user customizations, repository instructions, retries, and session persistence.
+Managed Claude policy still applies.
+Each turn uses a private directory and removes its prompt afterward.
+The [Claude CLI reference](https://code.claude.com/docs/en/cli-reference) describes these controls.
+
 `init` creates a private configuration file and refuses to overwrite an existing file.
 The default path is `$XDG_CONFIG_HOME/octorun/config.yaml`.
 If `XDG_CONFIG_HOME` is unset, it uses `~/.config`.
@@ -52,7 +71,7 @@ Set the environment variables named in the configuration:
 | Variable | Value |
 | --- | --- |
 | `OCTORUN_GITHUB_PRIVATE_KEY` | The complete PEM private key, including its line breaks |
-| `OCTORUN_API_KEY` | The configured agent provider's API key |
+| `OCTORUN_API_KEY` | The HTTP provider's API key, required only when you select HTTP |
 | `OCTORUN_WEBHOOK_SECRET` | A shared webhook secret with at least 16 characters |
 
 Use your service manager or secret manager to provide these values.
@@ -65,6 +84,13 @@ HTTPS is required except for a local HTTP endpoint on localhost.
 The provider receives the pull request text and diff.
 Select an endpoint that matches your repository's data policy.
 
+Configuration requires an explicit `provider._tag`.
+Use `OpenAICompatible` for HTTP settings and `Claude` for Claude settings.
+If you have older HTTP configuration, add `_tag: OpenAICompatible` inside its `provider` mapping.
+For Claude, remove HTTP fields such as `baseUrl` and `apiKeyEnv`.
+Set `provider.command` to a command on `PATH` or an absolute executable path.
+Relative executable paths are unsupported because turns run from private directories.
+
 ```bash
 octorun validate
 octorun doctor
@@ -73,7 +99,9 @@ octorun doctor --online
 
 `validate` parses the configuration without requiring credentials.
 `doctor` checks credential references without printing their values.
+For Claude, it also checks installation and login without starting a paid turn.
 `doctor --online` checks access to the configured GitHub repositories.
+HTTP diagnostics do not authenticate against the provider.
 It exits with code 1 if an access check fails.
 If a check fails, apply the error's remedy before running a review.
 

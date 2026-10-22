@@ -111,6 +111,10 @@ Transient failures retry within the configured task and workflow limits.
 If App permissions changed, run `doctor --online`.
 If credentials expired or were rotated, update the referenced environment values and restart the controller.
 If a provider rejects a model or endpoint, check `provider.model` and `provider.baseUrl`.
+For Claude, run `doctor` to check the executable and login without starting a paid turn.
+If login expired, run `claude auth login` as the controller user.
+Use the same `HOME`, `PATH`, and Claude configuration directory as the serving process.
+HTTP diagnostics check configuration and credential references, without authenticating against the HTTP provider.
 Use `--json` with any command to collect machine-readable output.
 Error output excludes credential values.
 
@@ -118,6 +122,7 @@ Accepted tasks pin the provider, endpoint, model, timeout, input limit, and resp
 Before changing these settings, drain the controller and inspect unfinished runs.
 Finish or cancel waiting work before changing the configuration.
 API key rotation does not change this pin.
+Changing `provider._tag` also changes the pin.
 
 After a restart, incompatible pending tasks fail with a configuration error.
 If inspection reports an unavailable task implementation, check for changed provider settings or a changed package version.

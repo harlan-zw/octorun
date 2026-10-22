@@ -1,3 +1,4 @@
+import type { InitialProviderConfiguration } from './config.ts'
 import type { Result } from './types.ts'
 import { err, ok } from './types.ts'
 
@@ -5,7 +6,7 @@ interface CommonOptions { configPath?: string, json: boolean }
 export type CliCommand = CommonOptions & (
   | { _tag: 'Help' | 'Version' | 'Validate' | 'Configuration' | 'Status' | 'Serve' | 'Drain' }
   | { _tag: 'Doctor', online: boolean }
-  | { _tag: 'Init', output?: string, repository: string, repositoryId: number, installationId: number, appId: string, model: string, baseUrl?: string }
+  | { _tag: 'Init', output?: string, repository: string, repositoryId: number, installationId: number, appId: string, provider: InitialProviderConfiguration }
   | { _tag: 'Poll', backfill: boolean }
   | { _tag: 'Run' | 'Plan', repository: string, number: number, workflow?: string, requestId?: string }
   | { _tag: 'Inspect', runId?: string }
@@ -18,7 +19,7 @@ export type CliCommand = CommonOptions & (
 )
 
 const failure = (message: string): Result<never> => err({ _tag: 'Configuration', message })
-const valueOptions = new Set(['config', 'output', 'repository', 'repository-id', 'installation-id', 'app-id', 'model', 'base-url', 'pr', 'workflow', 'request-id', 'backfill', 'run', 'limit', 'target', 'before'])
+const valueOptions = new Set(['config', 'output', 'repository', 'repository-id', 'installation-id', 'app-id', 'provider', 'model', 'base-url', 'pr', 'workflow', 'request-id', 'backfill', 'run', 'limit', 'target', 'before'])
 const booleanOptions = new Set(['json', 'help', 'version', 'online'])
 const number = (value: string | undefined): number | null => value && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null
 
@@ -61,7 +62,7 @@ export function parseCliArguments(args: string[]): Result<CliCommand> {
     positionals.shift()
   }
   const allowed: Record<string, string[]> = {
-    init: ['output', 'repository', 'repository-id', 'installation-id', 'app-id', 'model', 'base-url'],
+    init: ['output', 'repository', 'repository-id', 'installation-id', 'app-id', 'provider', 'model', 'base-url'],
     validate: [],
     config: [],
     doctor: ['online'],
@@ -91,9 +92,19 @@ export function parseCliArguments(args: string[]): Result<CliCommand> {
   if (command === 'init') {
     const repositoryId = number(values['repository-id'])
     const installationId = number(values['installation-id'])
-    if (!values.repository || !repositoryId || !installationId || !values['app-id'] || !values.model)
-      return failure('init needs --repository, --repository-id, --installation-id, --app-id, and --model.')
-    return ok({ ...common, _tag: 'Init', repository: values.repository, repositoryId, installationId, appId: values['app-id'], model: values.model, ...(values.output ? { output: values.output } : {}), ...(values['base-url'] ? { baseUrl: values['base-url'] } : {}) })
+    if (!values.repository || !repositoryId || !installationId || !values['app-id'])
+      return failure('init needs --repository, --repository-id, --installation-id, and --app-id.')
+    const selected = values.provider ?? 'http'
+    if (!['http', 'claude'].includes(selected))
+      return failure('Use --provider http or --provider claude.')
+    if (selected === 'claude' && values['base-url'])
+      return failure('Claude does not use --base-url. Remove that option.')
+    if (selected === 'http' && !values.model)
+      return failure('The HTTP provider needs --model.')
+    const provider: InitialProviderConfiguration = selected === 'claude'
+      ? { _tag: 'Claude', model: values.model ?? 'claude-opus-5-5' }
+      : { _tag: 'OpenAICompatible', model: values.model!, ...(values['base-url'] ? { baseUrl: values['base-url'] } : {}) }
+    return ok({ ...common, _tag: 'Init', repository: values.repository, repositoryId, installationId, appId: values['app-id'], provider, ...(values.output ? { output: values.output } : {}) })
   }
   if (command === 'doctor')
     return ok({ ...common, _tag: 'Doctor', online: flags.has('online') })

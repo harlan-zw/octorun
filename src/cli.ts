@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { parseCliArguments } from './cli-arguments.ts'
 import { initConfig, readConfig, resolvePaths, resolveSecrets } from './config.ts'
 import { requestControl, startControlServer } from './control.ts'
+import { checkClaudeAuthentication, withClaudeReadiness } from './providers.ts'
 import { startServer } from './server.ts'
 import { createOctorun } from './service.ts'
 import { restoreStoreBackup } from './store.ts'
@@ -16,7 +17,8 @@ const help = `Octorun runs reactive workflows for your GitHub repositories.
 Usage: octorun [--config FILE] [--json] COMMAND
 
   init --repository OWNER/REPO --repository-id ID --installation-id ID
-       --app-id ID --model MODEL [--base-url URL] [--output FILE]
+       --app-id ID [--provider http|claude] [--model MODEL]
+       [--base-url URL] [--output FILE]
   validate                          Check configuration without credentials
   config [validate]                 Show effective configuration or validate it
   doctor [--online]                 Check setup and optional GitHub access
@@ -118,8 +120,7 @@ async function main(args: string[]): Promise<number> {
       repositoryId: command.repositoryId,
       installationId: command.installationId,
       appId: command.appId,
-      model: command.model,
-      ...(command.baseUrl ? { baseUrl: command.baseUrl } : {}),
+      provider: command.provider,
     })
     return writeResult(result._tag === 'Ok' ? ok({ ...result.value, next: 'Set the referenced environment variables, then run octorun doctor.' }) : result, command.json)
   }
@@ -144,7 +145,8 @@ async function main(args: string[]): Promise<number> {
     const secrets = resolveSecrets(config)
     if (secrets._tag === 'Err')
       return writeResult(secrets, command.json)
-    return writeResult(ok({ configuration: 'valid', node: process.version, repositories: config.repositories.map(repository => repository.fullName), provider: config.provider.model, webhook: secrets.value.webhookSecret ? 'configured' : 'disabled', next: 'Run doctor --online to check GitHub access, then serve or poll.' }), command.json)
+    const diagnostic = ok({ ready: true, scope: 'local', configuration: 'valid', node: process.version, repositories: config.repositories.map(repository => repository.fullName), provider: { kind: config.provider._tag, model: config.provider.model, configured: true, authentication: 'not-checked' }, webhook: secrets.value.webhookSecret ? 'configured' : 'disabled', next: 'Run doctor --online to check GitHub access, then serve or poll.' })
+    return writeResult(config.provider._tag === 'Claude' ? withClaudeReadiness(diagnostic, await checkClaudeAuthentication({ command: config.provider.command })) : diagnostic, command.json, 'Doctor')
   }
   const request = commandRequest(command)
   if (request) {

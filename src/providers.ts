@@ -1,5 +1,10 @@
 import type { AgentProvider, AgentRequest, AgentResponse, Result, TaskFailure, Usage } from './types.ts'
 
+export { createClaudeProvider } from './claude-provider.ts'
+export type { ClaudeAgentProvider, ClaudeProviderOptions } from './claude-provider.ts'
+export { checkClaudeAuthentication, withClaudeReadiness } from './claude-readiness.ts'
+export type { ClaudeAuthenticationOptions } from './claude-readiness.ts'
+
 export interface OpenAICompatibleConfiguration {
   baseUrl: string
   model: string

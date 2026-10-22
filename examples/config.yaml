@@ -5,6 +5,7 @@ github:
   privateKeyEnv: OCTORUN_GITHUB_PRIVATE_KEY
   webhookSecretEnv: OCTORUN_WEBHOOK_SECRET
 provider:
+  _tag: OpenAICompatible
   baseUrl: https://api.openai.com/v1
   model: your-provider-model
   apiKeyEnv: OCTORUN_API_KEY

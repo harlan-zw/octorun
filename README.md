@@ -23,7 +23,8 @@ Both use the same scheduler and task contract.
 ## Setup
 
 Use Linux with Node.js 24 or newer and pnpm.
-Provide a GitHub App installation and an OpenAI-compatible chat completion endpoint.
+Provide a GitHub App installation and an agent provider.
+Choose an OpenAI-compatible chat completion endpoint or an existing Claude Code login.
 The review preset sends pull request text and diffs to the configured agent provider.
 It runs no repository code or shell commands.
 
@@ -55,10 +56,25 @@ octorun init --repository your-org/your-repository \
   --model your-provider-model
 ```
 
+For Claude Code, install the CLI and run `claude auth login` on the controller host.
+Then select Claude instead of the HTTP provider:
+
+```bash
+octorun init --repository your-org/your-repository \
+  --repository-id 456 --installation-id 789 --app-id 123 \
+  --provider claude
+```
+
+Claude defaults to `claude-opus-5-5`.
+Pass `--model` to select another model.
+It uses bounded text turns with tools, repository instructions, and session persistence disabled.
+See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference) for installation and login controls.
+
 The file names environment variables for credentials.
 Set those variables through your service manager or secret manager.
 `OCTORUN_GITHUB_PRIVATE_KEY` holds the complete App PEM private key.
-`OCTORUN_API_KEY` holds the agent provider key.
+The HTTP provider requires `OCTORUN_API_KEY`.
+Claude uses its existing login and requires no HTTP API key.
 `OCTORUN_WEBHOOK_SECRET` is optional for polling and required for webhook delivery.
 Use at least 16 characters for that secret.
 
@@ -73,6 +89,9 @@ octorun run --repository your-org/your-repository --pr 7
 `plan` shows the selected workflow without starting its tasks.
 `run` processes the requested pull request through the selected workflow.
 To process future events continuously, run `octorun serve`.
+`doctor` checks Claude installation and login without a paid turn.
+`doctor --online` also checks GitHub access.
+HTTP diagnostics check configuration and referenced credentials, without authenticating against the provider.
 
 Read [first review](docs/guides/first-review.md) for App permissions, credentials, webhooks, and initial polling.
 

@@ -102,7 +102,7 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
     port: 0,
     handle: 'octorun',
     github: { appId: '7', privateKeyEnv: 'APP_KEY', webhookSecretEnv: 'WEBHOOK_SECRET', apiUrl: 'https://api.github.com' },
-    provider: { baseUrl: 'https://provider.invalid/v1', model: 'test-model', apiKeyEnv: 'API_KEY', timeoutMs: 1000, maxResponseBytes: 10000, maxInputCharacters: 100000 },
+    provider: { _tag: 'OpenAICompatible', baseUrl: 'https://provider.invalid/v1', model: 'test-model', apiKeyEnv: 'API_KEY', timeoutMs: 1000, maxResponseBytes: 10000, maxInputCharacters: 100000 },
     repositories: [{ ...repository, policy: { enabled: true, capabilities: ['repository:read', 'agent:invoke', 'github:comment', 'github:review', 'github:check'], maxConcurrency: 2 }, workflowSource: { _tag: 'Presets', presets: ['adversarial-review'] } }],
     pollIntervalMs: 0,
     limits: { bodyBytes: 1024 * 1024, requestsPerMinute: 100, concurrency: 2 },

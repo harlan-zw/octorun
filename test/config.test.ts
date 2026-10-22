@@ -12,7 +12,7 @@ function input() {
   return {
     version: 1,
     github: { appId: '123', privateKeyEnv: 'APP_KEY', webhookSecretEnv: 'HOOK_KEY' },
-    provider: { baseUrl: 'https://example.test/v1', model: 'review-model', apiKeyEnv: 'MODEL_KEY' },
+    provider: { _tag: 'OpenAICompatible', baseUrl: 'https://example.test/v1', model: 'review-model', apiKeyEnv: 'MODEL_KEY' },
     repositories: [{ id: 7, fullName: 'team/example', installationId: 8 }],
   }
 }
@@ -71,14 +71,14 @@ it('creates a private config without secrets and refuses to replace it', async (
   const root = await mkdtemp(join(tmpdir(), 'octorun-config-'))
   roots.push(root)
   const path = join(root, 'nested', 'config.yaml')
-  const result = await initConfig({ path, repository: 'team/example', repositoryId: 7, installationId: 8, appId: '123', model: 'review-model' })
+  const result = await initConfig({ path, repository: 'team/example', repositoryId: 7, installationId: 8, appId: '123', provider: { _tag: 'OpenAICompatible', model: 'review-model' } })
   expect(result._tag).toBe('Ok')
   expect((await stat(path)).mode & 0o777).toBe(0o600)
   const loaded = await readConfig({ path, env: {}, home: root })
   expect(loaded._tag).toBe('Ok')
   const text = await readFile(path, 'utf8')
   expect(text).toContain('OCTORUN_GITHUB_PRIVATE_KEY')
-  const again = await initConfig({ path, repository: 'team/other', repositoryId: 9, installationId: 8, appId: '123', model: 'other-model' })
+  const again = await initConfig({ path, repository: 'team/other', repositoryId: 9, installationId: 8, appId: '123', provider: { _tag: 'OpenAICompatible', model: 'other-model' } })
   expect(again._tag).toBe('Err')
   expect(await readFile(path, 'utf8')).toBe(text)
 })
