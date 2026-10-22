@@ -6,27 +6,27 @@
   "license": "MIT",
   "exports": {
     ".": {
-      "types": "./dist/index.d.mts",
+      "types": "./dist/types/index.d.ts",
       "import": "./dist/index.mjs"
     },
     "./config": {
-      "types": "./dist/config.d.mts",
+      "types": "./dist/types/config.d.ts",
       "import": "./dist/config.mjs"
     },
     "./server": {
-      "types": "./dist/server.d.mts",
+      "types": "./dist/types/server.d.ts",
       "import": "./dist/server.mjs"
     },
     "./github": {
-      "types": "./dist/github.d.mts",
+      "types": "./dist/types/github.d.ts",
       "import": "./dist/github.mjs"
     },
     "./review": {
-      "types": "./dist/review.d.mts",
+      "types": "./dist/types/review.d.ts",
       "import": "./dist/review.mjs"
     },
     "./providers": {
-      "types": "./dist/providers.d.mts",
+      "types": "./dist/types/providers.d.ts",
       "import": "./dist/providers.mjs"
     }
   },
@@ -45,7 +45,8 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "obuild",
+    "build": "obuild && tsc --project tsconfig.build.json && pnpm check:consumer",
+    "check:consumer": "tsc --project tsconfig.consumer.json && node .build/consumer/scripts/check-runtime.js",
     "dev": "node --experimental-strip-types src/cli.ts",
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit",

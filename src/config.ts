@@ -39,7 +39,7 @@ export interface ConfigContext {
 export interface SecretValues {
   privateKey: string
   webhookSecret: string | null
-  apiKey: string
+  apiKey: string | null
 }
 
 const defaultCapabilities: Capability[] = ['repository:read', 'agent:invoke', 'github:comment', 'github:review', 'github:check']
@@ -230,8 +230,10 @@ export async function readConfig(options: { path?: string, env?: NodeJS.ProcessE
   return parseConfig(value.value, { configDir: dirname(resolve(path)), env: options.env ?? process.env, home: options.home ?? homedir() })
 }
 
-export function resolveSecrets(config: OperatorConfig, env: NodeJS.ProcessEnv = process.env, options: { requireWebhook?: boolean } = {}): Result<SecretValues> {
-  const references = [config.github.privateKeyEnv, config.provider.apiKeyEnv]
+export function resolveSecrets(config: OperatorConfig, env: NodeJS.ProcessEnv = process.env, options: { requireWebhook?: boolean, requireProvider?: boolean } = {}): Result<SecretValues> {
+  const references = [config.github.privateKeyEnv]
+  if (options.requireProvider !== false)
+    references.push(config.provider.apiKeyEnv)
   if (options.requireWebhook)
     references.push(config.github.webhookSecretEnv)
   for (const name of references) {
@@ -241,7 +243,7 @@ export function resolveSecrets(config: OperatorConfig, env: NodeJS.ProcessEnv = 
   const webhookSecret = env[config.github.webhookSecretEnv]?.trim() || null
   if (webhookSecret !== null && webhookSecret.length < 16)
     return invalid(`Set ${config.github.webhookSecretEnv} to at least 16 characters.`)
-  return ok({ privateKey: env[config.github.privateKeyEnv]!, apiKey: env[config.provider.apiKeyEnv]!, webhookSecret })
+  return ok({ privateKey: env[config.github.privateKeyEnv]!, apiKey: options.requireProvider === false ? null : env[config.provider.apiKeyEnv]!, webhookSecret })
 }
 
 export async function initConfig(options: { path: string, repository: string, repositoryId: number, installationId: number, appId: string, model: string, baseUrl?: string }): Promise<Result<{ path: string }>> {

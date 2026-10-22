@@ -28,5 +28,8 @@
     "test",
     "examples",
     "scripts"
+  ],
+  "exclude": [
+    "test/fixtures/public-consumer.ts"
   ]
 }

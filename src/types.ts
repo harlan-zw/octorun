@@ -260,6 +260,8 @@ export interface AgentResponse {
 
 export interface AgentProvider {
   id: string
+  /** Extra input tokens used outside request messages. Defaults to 256. */
+  inputTokenOverhead?: number
   generate: (request: AgentRequest) => Promise<Result<AgentResponse>>
 }
 

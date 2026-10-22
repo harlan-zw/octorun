@@ -23,7 +23,7 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).reverse().map(close => close()))
 })
 
-async function setup(options: { failProvider?: boolean, sourceText?: string } = {}) {
+async function setup(options: { failProvider?: boolean, sourceText?: string, omitProviderKey?: boolean } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'octorun-service-'))
   const config: OperatorConfig = { version: 1, stateDir, host: '127.0.0.1', port: 0, handle: 'octorun', github: { appId: '7', privateKeyEnv: 'APP_KEY', webhookSecretEnv: 'WEBHOOK_SECRET', apiUrl: 'https://api.github.com' }, provider: { baseUrl: 'https://provider.example/v1', model: 'test-model', apiKeyEnv: 'API_KEY', timeoutMs: 1000, maxResponseBytes: 1024, maxInputCharacters: 100000 }, repositories: [{ ...repo, policy: { enabled: true, capabilities: ['repository:read', 'agent:invoke', 'github:comment', 'github:review', 'github:check'], maxConcurrency: 2 }, workflowSource: options.sourceText ? { _tag: 'Repository', path: '.github/octorun.yml' } : { _tag: 'Presets', presets: ['adversarial-review'] } }], pollIntervalMs: 0, limits: { bodyBytes: 1024 * 1024, requestsPerMinute: 100, concurrency: 2 } }
   let currentHead = head
@@ -101,14 +101,14 @@ async function setup(options: { failProvider?: boolean, sourceText?: string } = 
       return { _tag: 'Err', error: { _tag: 'Permanent', message: `Unexpected fixture route: ${pathAccess} ${path}.` } }
     },
   }
-  const provider: AgentProvider = { id: 'test-provider', async generate(request) {
+  const provider: AgentProvider = { id: 'test-provider', inputTokenOverhead: 256, async generate(request) {
     providerCalls++
     if (options.failProvider)
       return { _tag: 'Err', error: { _tag: 'Permanent', message: 'The provider rejected this request.' } }
     return ok({ text: request.messages[0]!.content.includes('release') ? 'Update the input parser.' : '{"findings":[]}', usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
   } }
   const create = async (): Promise<OctorunService> => {
-    const created = await createOctorun({ config, env: { APP_KEY: 'fixture-private-key', API_KEY: 'fixture-api-key', WEBHOOK_SECRET: secret }, now: () => new Date(clockMs), client, provider })
+    const created = await createOctorun({ config, env: { APP_KEY: 'fixture-private-key', ...(!options.omitProviderKey ? { API_KEY: 'fixture-api-key' } : {}), WEBHOOK_SECRET: secret }, now: () => new Date(clockMs), client, provider })
     if (created._tag === 'Err')
       throw new Error(created.error.message)
     return created.value
@@ -130,6 +130,8 @@ async function setup(options: { failProvider?: boolean, sourceText?: string } = 
     currentHead = sha
   }, setPermission: (value: 'read' | 'write') => {
     permission = value
+  }, setProviderInputTokenOverhead: (value: number) => {
+    provider.inputTokenOverhead = value
   }, restart: async () => {
     await service.close()
     service = await create()
@@ -149,6 +151,21 @@ describe('trusted repository workflows', () => {
 })
 
 describe('reactive service composition', () => {
+  it('uses an injected provider without requiring the unused HTTP provider key', async () => {
+    const test = await setup({ omitProviderKey: true })
+    const result = await test.service().run({ repository: repo.fullName, number: 1, requestId: 'injected-provider' })
+    expect(result._tag).toBe('Ok')
+    await test.service().settle()
+    expect(test.service().runner.runs()[0]?.state._tag).toBe('Succeeded')
+    expect(test.providerCalls()).toBeGreaterThan(0)
+  })
+
+  it('requires the HTTP provider key when no provider is injected', async () => {
+    const test = await setup()
+    const result = await createOctorun({ config: test.config, env: { APP_KEY: 'fixture-private-key' }, client: test.client })
+    expect(result).toEqual({ _tag: 'Err', error: { _tag: 'Configuration', message: 'Set API_KEY before starting Octorun.' } })
+  })
+
   it('previews a selected workflow against its live pinned target without executing tasks or publishing', async () => {
     const test = await setup()
     test.config.repositories[0]!.workflowSource = { _tag: 'Presets', presets: ['adversarial-review', 'change-summary'] }
@@ -231,6 +248,16 @@ describe('reactive service composition', () => {
     const test = await setup()
     expect(await test.service().run({ repository: repo.fullName, number: 1, requestId: 'pinned-provider' })).toMatchObject({ _tag: 'Ok', value: { state: 'Queued' } })
     test.config.provider.model = 'different-model'
+    await test.restart()
+    await test.service().settle()
+    expect(test.providerCalls()).toBe(0)
+    expect(test.service().runner.runs()).toMatchObject([{ state: { _tag: 'Failed', error: { _tag: 'Configuration' } } }])
+  })
+
+  it('refuses a changed provider token allowance when recovering accepted work', async () => {
+    const test = await setup()
+    expect(await test.service().run({ repository: repo.fullName, number: 1, requestId: 'pinned-provider-overhead' })).toMatchObject({ _tag: 'Ok', value: { state: 'Queued' } })
+    test.setProviderInputTokenOverhead(2048)
     await test.restart()
     await test.service().settle()
     expect(test.providerCalls()).toBe(0)
