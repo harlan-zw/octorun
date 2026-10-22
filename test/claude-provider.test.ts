@@ -11,22 +11,23 @@ import { spawn } from 'node:child_process'
 import { readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs'
 let input = ''
 for await (const chunk of process.stdin) input += chunk
-const args = process.argv.slice(2)
+const fixture = JSON.parse(process.argv[2])
+const args = process.argv.slice(3)
 const systemPath = args[args.indexOf('--system-prompt-file') + 1]
 const record = { args, input, system: readFileSync(systemPath, 'utf8'), systemMode: statSync(systemPath).mode & 0o777, directoryMode: statSync(process.cwd()).mode & 0o777, files: readdirSync(process.cwd()), cwd: process.cwd(), env: { tokens: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, retries: process.env.CLAUDE_CODE_MAX_RETRIES, watchdog: process.env.CLAUDE_CODE_RETRY_WATCHDOG, title: process.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE, fallback: process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK, traffic: process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC } }
-writeFileSync(process.env.FIXTURE_RECORD, JSON.stringify(record))
-const payload = JSON.parse(process.env.FIXTURE_RESPONSE ?? '{}')
-if (process.env.FIXTURE_MODE === 'hang') {
+writeFileSync(fixture.record, JSON.stringify(record))
+const payload = fixture.response
+if (fixture.FIXTURE_MODE === 'hang') {
   process.on('SIGTERM', () => {})
-  const child = spawn(process.execPath, ['-e', "const fs = require('node:fs'); process.on('SIGTERM', () => {}); setInterval(() => fs.appendFileSync(process.argv[1], '.'), 10)", process.env.FIXTURE_TICKS], { stdio: 'ignore' })
+  const child = spawn(process.execPath, ['-e', "const fs = require('node:fs'); process.on('SIGTERM', () => {}); setInterval(() => fs.appendFileSync(process.argv[1], '.'), 10)", fixture.ticks], { stdio: 'ignore' })
   child.unref()
   setInterval(() => {}, 1000)
-} else if (process.env.FIXTURE_MODE === 'oversize') {
+} else if (fixture.FIXTURE_MODE === 'oversize') {
   process.stdout.write('🔒'.repeat(10000))
 } else {
-  process.stderr.write(process.env.FIXTURE_STDERR ?? '')
-  process.stdout.write(process.env.FIXTURE_MODE === 'invalid' ? 'invalid-json' : JSON.stringify(payload))
-  process.exitCode = Number(process.env.FIXTURE_EXIT ?? '0')
+  process.stderr.write(fixture.FIXTURE_STDERR ?? '')
+  process.stdout.write(fixture.FIXTURE_MODE === 'invalid' ? 'invalid-json' : JSON.stringify(payload))
+  process.exitCode = Number(fixture.FIXTURE_EXIT ?? '0')
 }
 `
 
@@ -64,8 +65,8 @@ describe('claude provider', () => {
     return createClaudeProvider({
       stateDir: join(directory, 'state'),
       command: process.execPath,
-      args: [script],
-      env: { ...process.env, FIXTURE_RECORD: record, FIXTURE_TICKS: ticks, FIXTURE_RESPONSE: JSON.stringify(response), ...extra },
+      args: [script, JSON.stringify({ record, ticks, response, ...extra })],
+      env: { ...process.env },
       ...options,
     })
   }

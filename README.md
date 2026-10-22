@@ -68,6 +68,10 @@ octorun init --repository your-org/your-repository \
 Claude defaults to `claude-opus-5-5`.
 Pass `--model` to select another model.
 It uses bounded text turns with tools, repository instructions, and session persistence disabled.
+Authentication checks and turns use the same environment allowlist.
+It preserves stored-login paths, locale, platform, proxy, and certificate settings.
+It excludes controller credentials, injected Node options, API tokens, OAuth tokens, and backend overrides.
+Use `claude auth login` with the controller's `HOME` and optional `CLAUDE_CONFIG_DIR`.
 See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference) for installation and login controls.
 
 The file names environment variables for credentials.

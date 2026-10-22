@@ -53,7 +53,7 @@ it.each(['http', 'claude'] as const)('runs the production tarball with %s from a
   const key = join(root, 'localhost.key')
   await Promise.all([mkdir(installation), mkdir(home), mkdir(configHome), mkdir(stateHome)])
   const claude = join(home, 'claude.ts')
-  const claudeCalls = join(root, 'claude-calls')
+  const claudeCalls = join(home, 'claude-calls')
   await copyFile(new URL('./fixtures/claude-package.ts', import.meta.url), claude)
   await chmod(claude, 0o700)
   await writeFile(claudeCalls, '')
@@ -176,7 +176,7 @@ it.each(['http', 'claude'] as const)('runs the production tarball with %s from a
     throw new Error('Mock HTTPS server did not start.')
   const apiUrl = `https://127.0.0.1:${address.port}`
   const configPath = join(configHome, 'octorun', 'config.yaml')
-  const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, NODE_EXTRA_CA_CERTS: cert, APP_KEY: await readFile(key, 'utf8'), API_KEY: 'synthetic-provider-key', WEBHOOK_SECRET: webhookSecret, OCTORUN_GITHUB_PRIVATE_KEY: await readFile(key, 'utf8'), OCTORUN_API_KEY: selectedProvider === 'http' ? 'synthetic-provider-key' : undefined, OCTORUN_WEBHOOK_SECRET: webhookSecret, OCTORUN_CLAUDE_CALLS: claudeCalls }
+  const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, NODE_EXTRA_CA_CERTS: cert, APP_KEY: await readFile(key, 'utf8'), API_KEY: 'synthetic-provider-key', WEBHOOK_SECRET: webhookSecret, OCTORUN_GITHUB_PRIVATE_KEY: await readFile(key, 'utf8'), OCTORUN_API_KEY: selectedProvider === 'http' ? 'synthetic-provider-key' : undefined, OCTORUN_WEBHOOK_SECRET: webhookSecret }
   const paidCalls = async () => selectedProvider === 'http' ? providerCalls : (await readFile(claudeCalls, 'utf8')).trim().split('\n').filter(Boolean).length
   const cliPath = join(installation, 'node_modules', '@harlan-zw', 'octorun', 'dist', 'cli.mjs')
   const cli = async (...args: string[]) => {

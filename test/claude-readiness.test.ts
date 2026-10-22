@@ -6,8 +6,8 @@ import { checkClaudeAuthentication, withClaudeReadiness } from '../src/providers
 function fixture(scenario: string): ClaudeAuthenticationOptions {
   return {
     command: process.execPath,
-    args: ['--experimental-strip-types', fileURLToPath(new URL('./fixtures/claude-auth.ts', import.meta.url))],
-    env: { ...process.env, OCTORUN_AUTH_SCENARIO: scenario },
+    args: ['--experimental-strip-types', fileURLToPath(new URL('./fixtures/claude-auth.ts', import.meta.url)), scenario],
+    env: { ...process.env },
     timeoutMs: 2000,
   }
 }

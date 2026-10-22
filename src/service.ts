@@ -58,8 +58,9 @@ export interface OctorunServiceOptions {
 
 export async function createOctorun(options: OctorunServiceOptions) {
   const { config } = options
+  const environment = { ...(options.env ?? process.env) }
   const now = options.now ?? (() => new Date())
-  const secrets = resolveSecrets(config, options.env ?? process.env, { requireProvider: options.provider === undefined })
+  const secrets = resolveSecrets(config, environment, { requireProvider: options.provider === undefined })
   if (secrets._tag === 'Err')
     return secrets
   const appId = Number(config.github.appId)
@@ -68,7 +69,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
   const provider = options.provider
     ? ok(options.provider)
     : config.provider._tag === 'Claude'
-      ? ok(createClaudeProvider({ ...config.provider, stateDir: config.stateDir, env: options.env ?? process.env }))
+      ? ok(createClaudeProvider({ ...config.provider, stateDir: config.stateDir, env: environment }))
       : createOpenAICompatibleProvider({ ...config.provider, apiKey: secrets.value.apiKey ?? '' }, { ...(options.fetch ? { fetch: options.fetch } : {}), now })
   if (provider._tag === 'Err')
     return provider
@@ -591,7 +592,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
       }
       const diagnostic = ok({ ready: results.every(result => githubObject(result)?.ok === true), repositories: results, provider: { kind: options.provider ? 'Injected' : config.provider._tag, model: config.provider.model, configured: true, authentication: 'not-checked' }, webhook: secrets.value.webhookSecret !== null })
       return config.provider._tag === 'Claude' && !options.provider
-        ? withClaudeReadiness(diagnostic, await checkClaudeAuthentication({ command: config.provider.command, env: options.env ?? process.env }))
+        ? withClaudeReadiness(diagnostic, await checkClaudeAuthentication({ command: config.provider.command, env: environment }))
         : diagnostic
     }
     return err({ _tag: 'Configuration', message: 'The local control command is unknown.' })

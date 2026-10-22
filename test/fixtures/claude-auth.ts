@@ -1,4 +1,4 @@
-const scenario = process.env.OCTORUN_AUTH_SCENARIO
+const scenario = process.argv[2]
 if (scenario === 'timeout') {
   setTimeout(() => {}, 30000)
 }

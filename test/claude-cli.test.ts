@@ -38,7 +38,8 @@ it('checks Claude login without an API key, a paid turn, or state creation', asy
 
 it('returns a failing exit status and a login remedy when Claude is signed out', async () => {
   const fixture = await setup()
-  const result = await execute(process.execPath, [cli, '--config', fixture.path, '--json', 'doctor'], { env: { ...fixture.env, OCTORUN_AUTH_SCENARIO: 'logout' }, cwd: fixture.root }).then(value => ({ ...value, code: 0 }), error => ({ stdout: String(error.stdout), code: error.code }))
+  await writeFile(join(dirname(fixture.command), 'claude-login'), 'logout')
+  const result = await execute(process.execPath, [cli, '--config', fixture.path, '--json', 'doctor'], { env: fixture.env, cwd: fixture.root }).then(value => ({ ...value, code: 0 }), error => ({ stdout: String(error.stdout), code: error.code }))
   expect(result.code).toBe(1)
   expect(JSON.parse(result.stdout)).toMatchObject({ ready: false, provider: { authenticated: false, error: expect.stringContaining('claude auth login') } })
 })

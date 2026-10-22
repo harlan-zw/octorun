@@ -56,6 +56,9 @@ octorun init --repository your-org/your-repository \
 Claude defaults to `claude-opus-5-5`.
 Use `--model` to choose another model.
 The adapter uses the existing login and requires no API key or endpoint.
+Use stored login files under `HOME` or `CLAUDE_CONFIG_DIR`.
+The adapter excludes API tokens, OAuth tokens, backend overrides, and controller credentials from child processes.
+It preserves locale, platform, proxy, and certificate settings.
 It disables tools, MCP servers, user customizations, repository instructions, retries, and session persistence.
 Managed Claude policy still applies.
 Each turn uses a private directory and removes its prompt afterward.

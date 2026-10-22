@@ -2,11 +2,13 @@ import type { JsonValue, Result } from './types.ts'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { promisify } from 'node:util'
+import { claudeEnvironment } from './claude-environment.ts'
 import { err, ok } from './types.ts'
 
 export interface ClaudeAuthenticationOptions {
   command?: string
   args?: readonly string[]
+  /** Uses the same stored-login environment allowlist as Claude turns. */
   env?: NodeJS.ProcessEnv
   timeoutMs?: number
 }
@@ -19,13 +21,14 @@ export async function checkClaudeAuthentication(options: ClaudeAuthenticationOpt
   const command = options.command ?? 'claude'
   const args = options.args ?? []
   const timeout = options.timeoutMs ?? 10000
+  const environment = claudeEnvironment(options.env ?? process.env)
   if (!command || command.includes('\0') || args.length > 32 || args.some(value => value.includes('\0'))
     || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 60000) {
     return err({ _tag: 'Configuration', message: 'The Claude authentication check configuration is invalid.' })
   }
   const completed = await execute(command, [...args, 'auth', 'status', '--json'], {
-    env: options.env ?? process.env,
-    cwd: options.env?.HOME ?? homedir(),
+    env: environment,
+    cwd: environment.HOME ?? homedir(),
     encoding: 'utf8',
     timeout,
     maxBuffer: 16384,

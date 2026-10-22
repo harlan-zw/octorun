@@ -3,9 +3,9 @@ import type { GitHubClient, PullRequestSnapshot } from '../src/github.ts'
 import type { OctorunService } from '../src/service.ts'
 import type { AgentProvider } from '../src/types.ts'
 import { createHmac } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { changeSummaryPreset } from '../src/review.ts'
 import { createOctorun, parseRepositoryWorkflows } from '../src/service.ts'
@@ -146,6 +146,20 @@ it('reports injected provider readiness without checking an unused Claude execut
   await test.restart()
   expect(await test.service().command('doctor', {})).toMatchObject({ _tag: 'Ok', value: { ready: true, provider: { kind: 'Injected', authentication: 'not-checked' } } })
   expect(test.providerCalls()).toBe(0)
+})
+
+it('keeps Claude readiness on the login environment selected when the controller starts', async () => {
+  const test = await setup()
+  const command = join(test.config.stateDir, 'claude.ts')
+  await copyFile(new URL('./fixtures/claude-package.ts', import.meta.url), command)
+  await chmod(command, 0o700)
+  const env = { APP_KEY: 'synthetic-key', HOME: test.config.stateDir, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` }
+  const created = await createOctorun({ config: { ...test.config, stateDir: join(test.config.stateDir, 'builtin'), provider: { _tag: 'Claude', command, model: 'test-model', timeoutMs: 1000, maxResponseBytes: 1024, maxInputBytes: 1024 } }, env, client: test.client })
+  if (created._tag === 'Err')
+    throw new Error(created.error.message)
+  cleanup.push(() => created.value.close())
+  env.HOME = '/missing/controller/home'
+  expect(await created.value.command('doctor', {})).toMatchObject({ _tag: 'Ok', value: { ready: true, provider: { authenticated: true } } })
 })
 
 const checkAction = (check: Record<string, unknown>, identifier: string) => ({ action: 'requested_action', repository: { id: 10, full_name: 'acme/project' }, installation: { id: 20 }, sender: { ...actor, type: 'User' }, check_run: check, requested_action: { identifier } })
