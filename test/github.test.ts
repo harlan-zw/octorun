@@ -300,7 +300,7 @@ describe('gitHub publication reconciliation', () => {
 
   it('updates one check through queued, running, and timeout states', async () => {
     const test = await fixture()
-    const publisher = createGitHubPublisher({ client: test.client })
+    const publisher = createGitHubPublisher({ client: test.client, nativeCheckActions: true })
     for (const phase of [{ status: 'queued' }, { status: 'in_progress' }, { status: 'completed', conclusion: 'timed_out' }] as const) {
       expect(await publisher.publish(publication({ _tag: 'Check', repository: 'acme/project', headSha: head, name: 'Octorun / Review', summary: 'Review status.', phase }, `check-${phase.status}`))).toMatchObject({ _tag: 'Ok' })
     }
@@ -310,6 +310,18 @@ describe('gitHub publication reconciliation', () => {
       [{ label: 'Cancel', description: 'Cancel this workflow run.', identifier: 'cancel' }],
       [{ label: 'Run again', description: 'Run this workflow again.', identifier: 'rerun' }],
     ])
+  })
+
+  it.each([undefined, false])('omits native check buttons without webhook delivery (%s)', async (nativeCheckActions) => {
+    const test = await fixture()
+    const publisher = createGitHubPublisher({ client: test.client, ...(nativeCheckActions === undefined ? {} : { nativeCheckActions }) })
+    for (const phase of [{ status: 'queued' }, { status: 'in_progress' }, { status: 'completed', conclusion: 'success' }] as const) {
+      expect(await publisher.publish(publication({ _tag: 'Check', repository: 'acme/project', headSha: head, name: 'Octorun / Review', summary: 'Review status.', phase }, `check-${phase.status}`))).toMatchObject({ _tag: 'Ok' })
+    }
+    const writes = test.requests.filter(request => ['POST', 'PATCH'].includes(request.method) && request.path.includes('/check-runs'))
+    expect(writes.map(request => request.body.status)).toEqual(['queued', 'in_progress', 'completed'])
+    for (const request of writes)
+      expect(request.body).not.toHaveProperty('actions')
   })
 
   it('blocks a stale head before creating a comment', async () => {

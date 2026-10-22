@@ -26,7 +26,8 @@ function receipt(value: unknown, extra: Record<string, string | number | string[
     : err({ _tag: 'Transient', message: 'GitHub accepted a write without a valid publication identity.' })
 }
 
-export function createGitHubPublisher(options: { client: GitHubClient, authorize?: (context: PublicationContext) => Promise<Result<void>> }): PublicationPublisher {
+/** Enable native check actions only when signed check run webhooks reach this controller. */
+export function createGitHubPublisher(options: { client: GitHubClient, nativeCheckActions?: boolean, authorize?: (context: PublicationContext) => Promise<Result<void>> }): PublicationPublisher {
   const client = options.client
   const checkRuns = async (context: PublicationContext): Promise<Result<unknown[]>> => {
     const effect = context.publication.effect
@@ -171,7 +172,7 @@ export function createGitHubPublisher(options: { client: GitHubClient, authorize
       const actions = effect.phase.status === 'completed'
         ? [{ label: 'Run again', description: 'Run this workflow again.', identifier: 'rerun' }]
         : [{ label: 'Cancel', description: 'Cancel this workflow run.', identifier: 'cancel' }]
-      body = { name: effect.name, head_sha: effect.headSha, external_id: `octorun:${context.run.id}`, ...effect.phase, actions, output: { title: effect.name.slice(0, 255), summary: effect.summary, text: marker }, ...(effect.detailsUrl === undefined ? {} : { details_url: effect.detailsUrl }) }
+      body = { name: effect.name, head_sha: effect.headSha, external_id: `octorun:${context.run.id}`, ...effect.phase, ...(options.nativeCheckActions === true ? { actions } : {}), output: { title: effect.name.slice(0, 255), summary: effect.summary, text: marker }, ...(effect.detailsUrl === undefined ? {} : { details_url: effect.detailsUrl }) }
     }
     else if (effect._tag === 'Reply') {
       access = 'review'
