@@ -1,4 +1,5 @@
 import type { ConfiguredRepository, OperatorConfig } from './config.ts'
+import type { GitHubAccess } from './github-auth.ts'
 import type { GitHubCommand } from './github-commands.ts'
 import type { GitHubPollCursor } from './github-events.ts'
 import type { GitHubClient } from './github.ts'
@@ -117,7 +118,13 @@ export async function createOctorun(options: OctorunServiceOptions) {
     },
   }
   const reviewTypes = createReviewTaskTypes({ provider: provider.value, snapshots: createGitHubSnapshotReader(client), previousReview: async (context) => {
-    const previous = store.runs({ repository: context.event.repository.fullName, states: ['Succeeded'] }).reverse().find(run => run.id !== context.run.id && targetKey(run.event) === targetKey(context.event) && run.definition.id === 'adversarial-review')
+    let previous: RunRecord | undefined
+    for (const run of store.scanRuns({ repository: context.event.repository.fullName, states: ['Succeeded'], order: 'newest' })) {
+      if (run.id !== context.run.id && targetKey(run.event) === targetKey(context.event) && run.definition.id === 'adversarial-review') {
+        previous = run
+        break
+      }
+    }
     const output = previous?.tasks.find(task => task.definition.uses === 'review.verify')?.output
     const report = githubObject(output)
     return report && typeof report.headSha === 'string' && typeof report.baseSha === 'string' && Array.isArray(report.fingerprints) && report.fingerprints.every(value => typeof value === 'string') ? { headSha: report.headSha, baseSha: report.baseSha, fingerprints: report.fingerprints as string[] } : null
@@ -188,7 +195,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
   let timer: ReturnType<typeof setInterval> | null = null
   let ticking: Promise<void> | null = null
   let closed = false
-  let lastPollAt = 0
+  let nextPollAt = 0
 
   const startWorkflow = (event: EventEnvelope, workflow: WorkflowDefinition, repository: ConfiguredRepository, configuration: ConfigurationSource, requestId: string): Result<RunRecord> => runner.start({ event, workflow, policy: repository.policy, configuration, requestId })
   const commandResponse = (event: EventEnvelope, repository: ConfiguredRepository, body: string): Result<RunRecord> => startWorkflow({ ...event, name: 'octorun.command' }, {
@@ -201,9 +208,11 @@ export async function createOctorun(options: OctorunServiceOptions) {
     limits: { maxAttempts: 2, timeoutMs: 15000, maxTokens: 1, maxCostUsd: null, maxDurationMs: 60000 },
   }, repository, { source: 'operator:command-response', sha: 'operator', digest: 'command-response-v1' }, `response:${event.semanticKey}`)
   const statusFor = (event: EventEnvelope): string => {
-    const runs = runner.runs({ repository: event.repository.fullName }).filter(run => targetKey(run.event) === targetKey(event) && run.definition.id !== 'command-response')
-    const run = runs.at(-1)
-    return run ? `${run.definition.name}: ${run.state._tag}.\nHead: ${run.event.target._tag === 'PullRequest' ? run.event.target.headSha.slice(0, 12) : 'not applicable'}.\nRun: ${run.id}.` : 'No workflow run exists for this target.'
+    for (const run of runner.scanRuns({ repository: event.repository.fullName, order: 'newest' })) {
+      if (targetKey(run.event) === targetKey(event) && run.definition.id !== 'command-response')
+        return `${run.definition.name}: ${run.state._tag}.\nHead: ${run.event.target._tag === 'PullRequest' ? run.event.target.headSha.slice(0, 12) : 'not applicable'}.\nRun: ${run.id}.`
+    }
+    return 'No workflow run exists for this target.'
   }
   const help = `Use @${config.handle} help, status, configuration, review, review full, run <workflow>, pause, resume, or cancel.\nRepair workflows are disabled.`
   const executeCommand = async (event: EventEnvelope, repository: ConfiguredRepository, command: GitHubCommand): Promise<Result<JsonValue>> => {
@@ -229,10 +238,14 @@ export async function createOctorun(options: OctorunServiceOptions) {
       response = command._tag === 'Pause' ? 'Automatic workflow runs are paused for this target. Active runs continue. Use cancel to stop active work.' : 'Automatic workflow runs are enabled for this target.'
     }
     else if (command._tag === 'Cancel') {
-      const active = runner.runs({ repository: repository.fullName }).filter(run => targetKey(run.event) === targetKey(event) && ['Queued', 'Running', 'Waiting'].includes(run.state._tag))
-      for (const run of active)
+      let cancelled = 0
+      for (const run of runner.scanRuns({ repository: repository.fullName, states: ['Queued', 'Running', 'Waiting'] })) {
+        if (targetKey(run.event) !== targetKey(event))
+          continue
         runner.cancel(run.id, `Cancelled by ${event.actor!.login}.`)
-      response = `Cancelled ${active.length} active workflow run${active.length === 1 ? '' : 's'}.`
+        cancelled++
+      }
+      response = `Cancelled ${cancelled} active workflow run${cancelled === 1 ? '' : 's'}.`
     }
     else if (command._tag === 'Repair') {
       return err({ _tag: 'Authorization', message: 'The operator must enable a repair workflow.' })
@@ -336,8 +349,8 @@ export async function createOctorun(options: OctorunServiceOptions) {
         const cursorKey = `automatic-activation:${targetKey(event)}`
         const previous = githubObject(store.cursor(cursorKey))
         store.setCursor(cursorKey, { _tag: 'Held', activation: typeof previous?.activation === 'string' ? previous.activation : '' })
-        for (const run of runner.runs({ repository: event.repository.fullName })) {
-          if (targetKey(run.event) === targetKey(event) && ['Queued', 'Running', 'Waiting'].includes(run.state._tag))
+        for (const run of runner.scanRuns({ repository: event.repository.fullName, states: ['Queued', 'Running', 'Waiting'] })) {
+          if (targetKey(run.event) === targetKey(event))
             runner.cancel(run.id, data?.draft === true ? 'The pull request is a draft.' : 'The pull request closed.')
         }
       })
@@ -378,7 +391,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
     return accepted._tag === 'Err' ? accepted : ok({ accepted: true, deliveryId: accepted.value.id, duplicate: accepted.value.duplicate })
   }
 
-  const poll = async (input: { backfill?: boolean, signal?: AbortSignal } = {}): Promise<Result<JsonValue>> => {
+  const pollRepositories = async (input: { backfill?: boolean, signal?: AbortSignal }): Promise<Result<JsonValue>> => {
     let accepted = 0
     for (const repository of config.repositories) {
       const saved = store.cursor(`poll:${repository.id}`)
@@ -399,8 +412,19 @@ export async function createOctorun(options: OctorunServiceOptions) {
       }
       store.setCursor(`poll:${repository.id}`, result.value.cursor as unknown as JsonValue)
     }
-    lastPollAt = now().getTime()
     return ok({ accepted })
+  }
+  const poll = async (input: { backfill?: boolean, signal?: AbortSignal } = {}): Promise<Result<JsonValue>> => {
+    let retryAt = Number.NaN
+    try {
+      const result = await pollRepositories(input)
+      if (result._tag === 'Err' && result.error.retryAt !== undefined)
+        retryAt = Date.parse(result.error.retryAt)
+      return result
+    }
+    finally {
+      nextPollAt = Math.max(now().getTime() + config.pollIntervalMs, Number.isFinite(retryAt) ? retryAt : 0)
+    }
   }
   const lifecycleRun = (run: RunRecord): void => {
     if (run.event.target._tag !== 'PullRequest' || ['command-response', 'review-conversation'].includes(run.definition.id))
@@ -420,9 +444,12 @@ export async function createOctorun(options: OctorunServiceOptions) {
       runner.publishSystem(run.id, `overview:${digest(effect)}`, effect)
     }
   }
+  let lifecycleRecovered = false
   const lifecycle = (): void => {
-    for (const run of runner.runs())
+    const filter = lifecycleRecovered ? { states: ['Queued', 'Running', 'Waiting'] } : {}
+    for (const run of runner.scanRuns(filter))
       lifecycleRun(run)
+    lifecycleRecovered = true
   }
   observeRun = lifecycleRun
   const tick = async (): Promise<void> => {
@@ -492,10 +519,10 @@ export async function createOctorun(options: OctorunServiceOptions) {
   }
   const command = async (name: string, args: Record<string, unknown> = {}): Promise<Result<JsonValue>> => {
     if (name === 'status')
-      return ok({ ready: !closed, paused: store.operatorPaused(), runs: runner.runs().map(value => ({ id: value.id, workflow: value.definition.id, repository: value.event.repository.fullName, state: value.state._tag, targetKey: targetKey(value.event) })) })
+      return ok({ ready: !closed, paused: store.operatorPaused(), runs: runner.runs({ order: 'newest' }).map(value => ({ id: value.id, workflow: value.definition.id, repository: value.event.repository.fullName, state: value.state._tag, targetKey: targetKey(value.event) })) })
     if (name === 'inspect') {
       const value = typeof args.runId === 'string' ? runner.inspect(args.runId) : null
-      return value ? ok({ ...value, targetKey: targetKey(value.event) } as unknown as JsonValue) : typeof args.runId === 'string' ? err({ _tag: 'Configuration', message: 'The workflow run was not found.' }) : ok(runner.runs() as unknown as JsonValue)
+      return value ? ok({ ...value, targetKey: targetKey(value.event) } as unknown as JsonValue) : typeof args.runId === 'string' ? err({ _tag: 'Configuration', message: 'The workflow run was not found.' }) : ok(runner.runs({ order: 'newest' }) as unknown as JsonValue)
     }
     if (name === 'logs')
       return ok(store.logs({ ...(typeof args.runId === 'string' ? { runId: args.runId } : {}), ...(typeof args.limit === 'number' ? { limit: args.limit } : {}) }) as unknown as JsonValue)
@@ -601,9 +628,39 @@ export async function createOctorun(options: OctorunServiceOptions) {
       } as unknown as JsonValue)
     }
     if (name === 'doctor') {
+      const checkRepository = async (repository: ConfiguredRepository): Promise<Result<void>> => {
+        const source = await definitions(repository)
+        if (source._tag === 'Err')
+          return source
+        const accesses = new Set<GitHubAccess>()
+        for (const workflow of source.value.workflows) {
+          const compiled = compileWorkflow(workflow, taskTypes)
+          if (compiled._tag === 'Err')
+            return compiled
+          for (const task of workflow.tasks) {
+            const type = taskTypes.find(type => type.id === task.uses)!
+            if (type.capabilities.some(capability => !repository.policy.capabilities.includes(capability)))
+              return err({ _tag: 'Authorization', message: `The repository policy does not grant task ${task.id} its required capabilities.` })
+            if (type.capabilities.includes('github:review'))
+              accesses.add('review')
+          }
+        }
+        if (repository.policy.capabilities.includes('github:check'))
+          accesses.add('check')
+        if (repository.policy.capabilities.includes('github:comment'))
+          accesses.add('comment')
+        for (const access of accesses) {
+          const credential = await client.auth.token(repository.fullName, access)
+          if (credential._tag === 'Err')
+            return credential
+          if (credential.value.installationId !== repository.installationId)
+            return err({ _tag: 'Authorization', message: 'The installed repository does not match the operator configuration.' })
+        }
+        return ok(undefined)
+      }
       const results: JsonValue[] = []
       for (const repository of config.repositories) {
-        const result = await definitions(repository)
+        const result = await checkRepository(repository)
         results.push({ repository: repository.fullName, ok: result._tag === 'Ok', error: result._tag === 'Err' ? result.error.message : null })
       }
       const diagnostic = ok({ ready: results.every(result => githubObject(result)?.ok === true), repositories: results, provider: { kind: options.provider ? 'Injected' : config.provider._tag, model: config.provider.model, configured: true, authentication: 'not-checked' }, webhook: secrets.value.webhookSecret !== null })
@@ -630,7 +687,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
         if (ticking || closed)
           return
         ticking = tick().then(async () => {
-          if (config.pollIntervalMs > 0 && now().getTime() - lastPollAt >= config.pollIntervalMs) {
+          if (config.pollIntervalMs > 0 && now().getTime() >= nextPollAt) {
             const result = await poll()
             if (result._tag === 'Err')
               store.log('poll.failed', { reason: result.error.message })
