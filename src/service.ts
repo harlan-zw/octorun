@@ -1,4 +1,5 @@
 import type { ConfiguredRepository, OperatorConfig } from './config.ts'
+import type { GitHubAccess } from './github-auth.ts'
 import type { GitHubCommand } from './github-commands.ts'
 import type { GitHubPollCursor } from './github-events.ts'
 import type { GitHubClient } from './github.ts'
@@ -601,9 +602,39 @@ export async function createOctorun(options: OctorunServiceOptions) {
       } as unknown as JsonValue)
     }
     if (name === 'doctor') {
+      const checkRepository = async (repository: ConfiguredRepository): Promise<Result<void>> => {
+        const source = await definitions(repository)
+        if (source._tag === 'Err')
+          return source
+        const accesses = new Set<GitHubAccess>()
+        for (const workflow of source.value.workflows) {
+          const compiled = compileWorkflow(workflow, taskTypes)
+          if (compiled._tag === 'Err')
+            return compiled
+          for (const task of workflow.tasks) {
+            const type = taskTypes.find(type => type.id === task.uses)!
+            if (type.capabilities.some(capability => !repository.policy.capabilities.includes(capability)))
+              return err({ _tag: 'Authorization', message: `The repository policy does not grant task ${task.id} its required capabilities.` })
+            if (type.capabilities.includes('github:review'))
+              accesses.add('review')
+          }
+        }
+        if (repository.policy.capabilities.includes('github:check'))
+          accesses.add('check')
+        if (repository.policy.capabilities.includes('github:comment'))
+          accesses.add('comment')
+        for (const access of accesses) {
+          const credential = await client.auth.token(repository.fullName, access)
+          if (credential._tag === 'Err')
+            return credential
+          if (credential.value.installationId !== repository.installationId)
+            return err({ _tag: 'Authorization', message: 'The installed repository does not match the operator configuration.' })
+        }
+        return ok(undefined)
+      }
       const results: JsonValue[] = []
       for (const repository of config.repositories) {
-        const result = await definitions(repository)
+        const result = await checkRepository(repository)
         results.push({ repository: repository.fullName, ok: result._tag === 'Ok', error: result._tag === 'Err' ? result.error.message : null })
       }
       const diagnostic = ok({ ready: results.every(result => githubObject(result)?.ok === true), repositories: results, provider: { kind: options.provider ? 'Injected' : config.provider._tag, model: config.provider.model, configured: true, authentication: 'not-checked' }, webhook: secrets.value.webhookSecret !== null })
