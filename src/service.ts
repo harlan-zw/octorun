@@ -189,7 +189,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
   let timer: ReturnType<typeof setInterval> | null = null
   let ticking: Promise<void> | null = null
   let closed = false
-  let lastPollAt = 0
+  let nextPollAt = 0
 
   const startWorkflow = (event: EventEnvelope, workflow: WorkflowDefinition, repository: ConfiguredRepository, configuration: ConfigurationSource, requestId: string): Result<RunRecord> => runner.start({ event, workflow, policy: repository.policy, configuration, requestId })
   const commandResponse = (event: EventEnvelope, repository: ConfiguredRepository, body: string): Result<RunRecord> => startWorkflow({ ...event, name: 'octorun.command' }, {
@@ -379,7 +379,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
     return accepted._tag === 'Err' ? accepted : ok({ accepted: true, deliveryId: accepted.value.id, duplicate: accepted.value.duplicate })
   }
 
-  const poll = async (input: { backfill?: boolean, signal?: AbortSignal } = {}): Promise<Result<JsonValue>> => {
+  const pollRepositories = async (input: { backfill?: boolean, signal?: AbortSignal }): Promise<Result<JsonValue>> => {
     let accepted = 0
     for (const repository of config.repositories) {
       const saved = store.cursor(`poll:${repository.id}`)
@@ -400,8 +400,19 @@ export async function createOctorun(options: OctorunServiceOptions) {
       }
       store.setCursor(`poll:${repository.id}`, result.value.cursor as unknown as JsonValue)
     }
-    lastPollAt = now().getTime()
     return ok({ accepted })
+  }
+  const poll = async (input: { backfill?: boolean, signal?: AbortSignal } = {}): Promise<Result<JsonValue>> => {
+    let retryAt = Number.NaN
+    try {
+      const result = await pollRepositories(input)
+      if (result._tag === 'Err' && result.error.retryAt !== undefined)
+        retryAt = Date.parse(result.error.retryAt)
+      return result
+    }
+    finally {
+      nextPollAt = Math.max(now().getTime() + config.pollIntervalMs, Number.isFinite(retryAt) ? retryAt : 0)
+    }
   }
   const lifecycleRun = (run: RunRecord): void => {
     if (run.event.target._tag !== 'PullRequest' || ['command-response', 'review-conversation'].includes(run.definition.id))
@@ -661,7 +672,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
         if (ticking || closed)
           return
         ticking = tick().then(async () => {
-          if (config.pollIntervalMs > 0 && now().getTime() - lastPollAt >= config.pollIntervalMs) {
+          if (config.pollIntervalMs > 0 && now().getTime() >= nextPollAt) {
             const result = await poll()
             if (result._tag === 'Err')
               store.log('poll.failed', { reason: result.error.message })
