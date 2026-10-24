@@ -103,7 +103,8 @@ octorun doctor --online
 `validate` parses the configuration without requiring credentials.
 `doctor` checks credential references without printing their values.
 For Claude, it also checks installation and login without starting a paid turn.
-`doctor --online` checks access to the configured GitHub repositories.
+`doctor --online` checks workflow task registration, repository policy, and GitHub App access.
+It checks required publication permissions without publishing or starting a model turn.
 HTTP diagnostics do not authenticate against the provider.
 It exits with code 1 if an access check fails.
 If a check fails, apply the error's remedy before running a review.
