@@ -20,6 +20,31 @@ export interface StoreOptions {
   now?: () => Date
 }
 
+export interface RunFilter {
+  repository?: string
+  states?: string[]
+  group?: string
+  order?: 'oldest' | 'newest'
+}
+
+function runSelection(filter: RunFilter): { clauses: string[], values: (string | number)[] } {
+  const clauses: string[] = []
+  const values: (string | number)[] = []
+  if (filter.repository) {
+    clauses.push('repository = ?')
+    values.push(filter.repository)
+  }
+  if (filter.states?.length) {
+    clauses.push(`status IN (${filter.states.map(() => '?').join(',')})`)
+    values.push(...filter.states)
+  }
+  if (filter.group) {
+    clauses.push('group_key = ?')
+    values.push(filter.group)
+  }
+  return { clauses, values }
+}
+
 export interface StoredDelivery {
   id: string
   event: string
@@ -268,23 +293,36 @@ export function openStore(options: StoreOptions) {
         return next
       })
     },
-    runs(filter: { repository?: string, states?: string[], limit?: number, group?: string } = {}): RunRecord[] {
-      const clauses: string[] = []
-      const values: (string | number)[] = []
-      if (filter.repository) {
-        clauses.push('repository = ?')
-        values.push(filter.repository)
-      }
-      if (filter.states?.length) {
-        clauses.push(`status IN (${filter.states.map(() => '?').join(',')})`)
-        values.push(...filter.states)
-      }
-      if (filter.group) {
-        clauses.push('group_key = ?')
-        values.push(filter.group)
-      }
+    runs(filter: RunFilter & { limit?: number } = {}): RunRecord[] {
+      const { clauses, values } = runSelection(filter)
       values.push(Math.min(10000, Math.max(1, filter.limit ?? 1000)))
-      return db.prepare(`SELECT data FROM runs ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created_at, rowid LIMIT ?`).all(...values).map(row => json<RunRecord>(row.data))
+      const direction = filter.order === 'newest' ? 'DESC' : 'ASC'
+      return db.prepare(`SELECT data FROM runs ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created_at ${direction}, rowid ${direction} LIMIT ?`).all(...values).map(row => json<RunRecord>(row.data))
+    },
+    scanRuns(filter: RunFilter = {}): IterableIterator<RunRecord> {
+      const boundary = Number(db.prepare('SELECT max(rowid) AS boundary FROM runs').get()?.boundary ?? 0)
+      const selection = runSelection(filter)
+      const newest = filter.order === 'newest'
+      const direction = newest ? 'DESC' : 'ASC'
+      const comparison = newest ? '<' : '>'
+      return (function* () {
+        let cursor: { createdAt: string, rowid: number } | null = null
+        for (;;) {
+          const clauses = [...selection.clauses, 'rowid <= ?']
+          const values = [...selection.values, boundary]
+          if (cursor) {
+            clauses.push(`(created_at ${comparison} ? OR (created_at = ? AND rowid ${comparison} ?))`)
+            values.push(cursor.createdAt, cursor.createdAt, cursor.rowid)
+          }
+          const rows = db.prepare(`SELECT data, created_at, rowid FROM runs WHERE ${clauses.join(' AND ')} ORDER BY created_at ${direction}, rowid ${direction} LIMIT 1000`).all(...values)
+          if (rows.length === 0)
+            return
+          for (const row of rows) {
+            cursor = { createdAt: String(row.created_at), rowid: Number(row.rowid) }
+            yield json<RunRecord>(row.data)
+          }
+        }
+      })()
     },
     publication: getPublication,
     enqueueSystem(publication: PublicationRecord): Result<string> {

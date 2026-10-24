@@ -101,7 +101,7 @@ export function createRunner(options: RunnerOptions) {
   }
   const prepare = (run: RunRecord, taskId: string, key: string, effect: PublicationEffect): PublicationRecord => ({ id: randomUUID(), key, runId: run.id, taskId, effect, state: { _tag: 'Queued' }, attempts: 0, createdAt: at(), updatedAt: at() })
 
-  for (const run of store.runs({ states: ['Queued', 'Running', 'Waiting'], limit: 10000 })) {
+  for (const run of store.scanRuns({ states: ['Queued', 'Running', 'Waiting'] })) {
     if (!run.tasks.some(task => task.state._tag === 'Running'))
       continue
     store.updateRun(run.id, current => ({ ...current, state: { _tag: 'Waiting', reason: 'Recovering interrupted execution.', until: at() }, updatedAt: at(), tasks: current.tasks.map(task => task.state._tag === 'Running' ? { ...task, state: { _tag: 'Waiting', reason: 'Recovering interrupted execution.', until: at() }, fence: task.fence + 1 } : task) }))
@@ -143,7 +143,9 @@ export function createRunner(options: RunnerOptions) {
       if (accepted._tag === 'Err')
         return accepted
       const group = `${event.repository.id}:${workflow.id}:${workflow.concurrency.group === 'repository' ? '*' : targetKey(event)}`
-      const others = store.runs({ group, states: ['Queued', 'Running', 'Waiting'] })
+      const groupFilter = { group, states: ['Queued', 'Running', 'Waiting'] }
+      const occupied = workflow.concurrency.mode === 'reject' && store.runs({ ...groupFilter, limit: 1 }).length > 0
+      const others = workflow.concurrency.mode === 'replace' ? store.scanRuns(groupFilter) : []
       const run: RunRecord = {
         id: randomUUID(),
         event,
@@ -151,7 +153,7 @@ export function createRunner(options: RunnerOptions) {
         definitionDigest,
         configuration: structuredClone(input.configuration),
         policy: structuredClone(input.policy),
-        state: workflow.concurrency.mode === 'reject' && others.length ? { _tag: 'Skipped', reason: 'Another workflow run owns this concurrency group.' } : { _tag: 'Queued' },
+        state: occupied ? { _tag: 'Skipped', reason: 'Another workflow run owns this concurrency group.' } : { _tag: 'Queued' },
         tasks: workflow.tasks.map(task => ({ id: task.id, definition: task, typeVersion: compiled.value[task.id]!, state: { _tag: 'Queued' }, attempts: 0, failures: 0, fence: 0, output: null, usage: zeroUsage(), unreservedUsage: zeroUsage(), usageReservations: [], startedAt: null, finishedAt: null })),
         usage: zeroUsage(),
         createdAt: at(),
@@ -564,7 +566,7 @@ export function createRunner(options: RunnerOptions) {
       if (run.startedAt === null && !['octorun.command', 'octorun.conversation'].includes(run.event.name) && run.event.source !== 'manual' && store.paused(run.event.repository.fullName, targetKey(run.event)))
         continue
       const group = `${run.event.repository.id}:${run.definition.id}:${run.definition.concurrency.group === 'repository' ? '*' : targetKey(run.event)}`
-      const groupRuns = store.runs({ group, states: ['Queued', 'Running', 'Waiting'] })
+      const groupRuns = store.runs({ group, states: ['Queued', 'Running', 'Waiting'], limit: 1 })
       if (run.definition.concurrency.mode === 'queue' && groupRuns[0]?.id !== run.id)
         continue
       const task = run.tasks.find(item => !['Succeeded', 'Skipped'].includes(item.state._tag))
@@ -686,6 +688,7 @@ export function createRunner(options: RunnerOptions) {
     },
     inspect: store.run,
     runs: store.runs,
+    scanRuns: store.scanRuns,
     publishSystem(runId: string, key: string, effect: PublicationEffect): Result<string> {
       if (stopping)
         return rejected('The controller is shutting down.')

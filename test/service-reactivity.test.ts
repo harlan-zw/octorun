@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createOctorun, err, findingMarker, ok, publicationMarker } from '../src/index.ts'
+import { adversarialReviewPreset, createOctorun, err, findingMarker, ok, publicationMarker } from '../src/index.ts'
 
 const repository = { id: 10, fullName: 'acme/project', installationId: 20 }
 const user = { id: 30, login: 'alice', kind: 'User' as const }
@@ -160,6 +160,93 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
     },
   }
 }
+
+function seedHistory(service: OctorunService, count = 1001, prefix = 'history'): RunRecord {
+  const run: RunRecord = {
+    id: 'history',
+    event: { id: 'history', semanticKey: 'history', source: 'manual', name: 'pull_request', action: 'opened', repository, actor: null, target: { _tag: 'PullRequest', number: 2, headSha: head, baseSha: base }, occurredAt: now.toISOString(), receivedAt: now.toISOString(), data: null },
+    definition: adversarialReviewPreset(),
+    definitionDigest: 'history',
+    configuration: { source: 'operator', sha: 'operator', digest: 'history' },
+    policy: { enabled: true, capabilities: [], maxConcurrency: 1 },
+    state: { _tag: 'Succeeded' },
+    tasks: [],
+    usage: { inputTokens: 0, outputTokens: 0, costUsd: null },
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    startedAt: now.toISOString(),
+    finishedAt: now.toISOString(),
+  }
+  service.store.transaction(() => {
+    for (let index = 0; index < count; index++) {
+      const id = `${prefix}-${index}`
+      service.store.createRun({ ...run, id }, { trigger: id, group: id })
+    }
+  })
+  return run
+}
+
+describe('controls with retained history', () => {
+  it.each(['command', 'closed', 'draft'])('cancels every active target run beyond the history and active page limits: %s', async (trigger) => {
+    const test = await setup()
+    const history = seedHistory(test.service())
+    const activeIds = Array.from({ length: 1001 }, (_, index) => `active-${index}`)
+    test.service().store.transaction(() => {
+      for (const id of activeIds)
+        test.service().store.createRun({ ...history, id, event: { ...history.event, target: { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base } }, state: { _tag: 'Queued' }, finishedAt: null }, { trigger: id, group: id })
+    })
+    if (trigger === 'command') {
+      await test.comment('@octorun cancel', false)
+    }
+    else {
+      test.service().store.setCursor('poll:10', { version: 1, since: now.toISOString(), pullRequests: { 1: 'previous-observation' }, comments: {} })
+      if (trigger === 'closed')
+        test.closePr()
+      else
+        test.setDraft()
+      await test.service().poll()
+    }
+    await test.service().settle()
+    expect(activeIds.every(id => test.service().runner.inspect(id)?.state._tag === 'Cancelled')).toBe(true)
+    if (trigger === 'command')
+      expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Cancelled 1001 active workflow runs')])
+  })
+
+  it('reports the latest target run when other targets fill the recent history', async () => {
+    const test = await setup()
+    const history = seedHistory(test.service())
+    const id = 'latest-target-run'
+    test.service().store.createRun({ ...history, id, event: { ...history.event, target: { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base } }, definition: { ...history.definition, name: 'Latest target review' } }, { trigger: id, group: id })
+    seedHistory(test.service(), 1001, 'later-history')
+    await test.comment('@octorun status', false)
+    await test.service().settle()
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Latest target review: Succeeded.')])
+  })
+
+  it('uses the newest successful review beyond retained unrelated history', async () => {
+    const test = await setup()
+    const history = seedHistory(test.service())
+    const id = 'newest-target-review'
+    const previousHead = 'd'.repeat(40)
+    test.service().store.createRun({ ...history, id, event: { ...history.event, target: { _tag: 'PullRequest', number: 1, headSha: previousHead, baseSha: base } }, tasks: [{ id: 'verify', definition: { id: 'verify', uses: 'review.verify', with: {} }, typeVersion: '1', state: { _tag: 'Succeeded' }, attempts: 1, failures: 0, fence: 1, output: { headSha: previousHead, baseSha: base, fingerprints: ['latest-finding'] }, usage: history.usage, unreservedUsage: history.usage, usageReservations: [], startedAt: history.startedAt, finishedAt: history.finishedAt }] }, { trigger: id, group: id })
+    const started = await test.service().run({ repository: repository.fullName, number: 1 })
+    if (started._tag === 'Err' || typeof started.value !== 'object' || started.value === null || Array.isArray(started.value) || typeof started.value.runId !== 'string')
+      throw new Error('The review did not start.')
+    await test.service().settle()
+    const selection = test.service().runner.inspect(started.value.runId)?.tasks.find(task => task.definition.uses === 'review.snapshot')?.output
+    expect(selection).toMatchObject({ previous: { headSha: previousHead, fingerprints: ['latest-finding'] } })
+  })
+
+  it('recovers the terminal check beyond the retained history limit', async () => {
+    const test = await setup()
+    const history = seedHistory(test.service())
+    const id = 'unreported-terminal-run'
+    test.service().store.createRun({ ...history, id, event: { ...history.event, target: { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base } }, policy: { ...history.policy, capabilities: ['github:check'] } }, { trigger: id, group: id })
+    await test.restart()
+    await test.service().settle()
+    expect(test.checks).toEqual([expect.objectContaining({ external_id: `octorun:${id}`, status: 'completed', conclusion: 'success' })])
+  })
+})
 
 describe('finding conversations', () => {
   it.each(['Why does this fail?', '@octorun Why does this fail?'])('answers an authorized finding question: %s', async (question) => {
