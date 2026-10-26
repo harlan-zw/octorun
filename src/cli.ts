@@ -16,8 +16,8 @@ const help = `Octorun runs reactive workflows for your GitHub repositories.
 
 Usage: octorun [--config FILE] [--json] COMMAND
 
-  init --repository OWNER/REPO --repository-id ID --installation-id ID
-       --app-id ID [--provider http|claude] [--model MODEL]
+  init --repository OWNER/REPO --app-id ID [--provider http|claude] [--model MODEL]
+       [--repository-id ID --installation-id ID]
        [--base-url URL] [--output FILE]
   validate                          Check configuration without credentials
   config [validate]                 Show effective configuration or validate it
@@ -117,8 +117,7 @@ async function main(args: string[]): Promise<number> {
     const result = await initConfig({
       path: command.output ?? command.configPath ?? resolvePaths().configPath,
       repository: command.repository,
-      repositoryId: command.repositoryId,
-      installationId: command.installationId,
+      identity: command.identity,
       appId: command.appId,
       provider: command.provider,
     })

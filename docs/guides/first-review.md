@@ -9,7 +9,7 @@ Choose an HTTP provider key or an existing Claude Code login.
 
 [Register a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
 Install it only on the repositories you want Octorun to process.
-Record its App ID, installation ID, and each repository ID.
+Record its App ID.
 Generate an App private key and store it outside the checkout.
 
 For the review preset, configure these repository permissions:
@@ -35,11 +35,12 @@ GitHub also supports App installations with webhooks disabled for polling.
 ## Create the configuration
 
 Run this from any directory.
-Replace the example IDs and model with your own values.
+Set `OCTORUN_GITHUB_PRIVATE_KEY` to the complete App PEM private key through your service manager or secret manager.
+Replace the example App ID and model with your own values.
+Octorun discovers the installed repository and installation IDs without publishing or starting a model turn.
 
 ```bash
-octorun init --repository your-org/your-repository \
-  --repository-id 456 --installation-id 789 --app-id 123 \
+octorun init --repository your-org/your-repository --app-id 123 \
   --model your-provider-model
 ```
 
@@ -48,8 +49,7 @@ For Claude Code, install the CLI and sign in on the controller host with `claude
 Create the configuration with:
 
 ```bash
-octorun init --repository your-org/your-repository \
-  --repository-id 456 --installation-id 789 --app-id 123 \
+octorun init --repository your-org/your-repository --app-id 123 \
   --provider claude
 ```
 
@@ -65,6 +65,7 @@ Each turn uses a private directory and removes its prompt afterward.
 The [Claude CLI reference](https://code.claude.com/docs/en/cli-reference) describes these controls.
 
 `init` creates a private configuration file and refuses to overwrite an existing file.
+For offline setup, provide both `--repository-id ID` and `--installation-id ID` to skip discovery.
 The default path is `$XDG_CONFIG_HOME/octorun/config.yaml`.
 If `XDG_CONFIG_HOME` is unset, it uses `~/.config`.
 Pass `--config FILE` on later commands to use another location.

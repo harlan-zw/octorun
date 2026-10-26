@@ -48,11 +48,12 @@ If pnpm reports a missing global binary directory, run `pnpm setup` and open a n
 The tarball contains the CLI, library declarations, preset implementation, examples, and license.
 Use a release tarball from your chosen source when installing outside this checkout.
 
-Create configuration with your App and repository IDs:
+Set `OCTORUN_GITHUB_PRIVATE_KEY` through your service manager or secret manager before creating configuration.
+It holds the complete App PEM private key.
+Octorun uses your App ID and key to discover the repository and installation IDs:
 
 ```bash
-octorun init --repository your-org/your-repository \
-  --repository-id 456 --installation-id 789 --app-id 123 \
+octorun init --repository your-org/your-repository --app-id 123 \
   --model your-provider-model
 ```
 
@@ -60,8 +61,7 @@ For Claude Code, install the CLI and run `claude auth login` on the controller h
 Then select Claude instead of the HTTP provider:
 
 ```bash
-octorun init --repository your-org/your-repository \
-  --repository-id 456 --installation-id 789 --app-id 123 \
+octorun init --repository your-org/your-repository --app-id 123 \
   --provider claude
 ```
 
@@ -74,9 +74,9 @@ It excludes controller credentials, injected Node options, API tokens, OAuth tok
 Use `claude auth login` with the controller's `HOME` and optional `CLAUDE_CONFIG_DIR`.
 See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference) for installation and login controls.
 
+For offline setup, provide both `--repository-id ID` and `--installation-id ID` to skip discovery.
 The file names environment variables for credentials.
 Set those variables through your service manager or secret manager.
-`OCTORUN_GITHUB_PRIVATE_KEY` holds the complete App PEM private key.
 The HTTP provider requires `OCTORUN_API_KEY`.
 Claude uses its existing login and requires no HTTP API key.
 `OCTORUN_WEBHOOK_SECRET` is optional for polling and required for webhook delivery.

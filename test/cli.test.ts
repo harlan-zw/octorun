@@ -42,3 +42,22 @@ it('distinguishes controller admission controls from repository controls', () =>
   expect(parseCliArguments(['pause', '--pr', '7'])._tag).toBe('Err')
   expect(parseCliArguments(['resume', '--target', '1:pull_request:7'])._tag).toBe('Err')
 })
+
+it('discovers repository identity when setup omits both numeric IDs', () => {
+  expect(parseCliArguments(['init', '--repository', 'team/example', '--app-id', '123', '--provider', 'claude']))
+    .toEqual({ _tag: 'Ok', value: { _tag: 'Init', repository: 'team/example', identity: { _tag: 'Discover' }, appId: '123', provider: { _tag: 'Claude', model: 'claude-opus-5-5' }, json: false } })
+})
+
+it('keeps explicit repository identity available for offline setup', () => {
+  expect(parseCliArguments(['init', '--repository', 'team/example', '--repository-id', '7', '--installation-id', '8', '--app-id', '123', '--provider', 'claude']))
+    .toEqual({ _tag: 'Ok', value: { _tag: 'Init', repository: 'team/example', identity: { _tag: 'Explicit', repositoryId: 7, installationId: 8 }, appId: '123', provider: { _tag: 'Claude', model: 'claude-opus-5-5' }, json: false } })
+})
+
+it.each([
+  ['--repository-id', '7'],
+  ['--installation-id', '8'],
+  ['--repository-id', '0', '--installation-id', '8'],
+  ['--repository-id', '7', '--installation-id', 'wrong'],
+])('rejects incomplete explicit repository identity: %s', (...identity) => {
+  expect(parseCliArguments(['init', '--repository', 'team/example', '--app-id', '123', '--provider', 'claude', ...identity])._tag).toBe('Err')
+})
