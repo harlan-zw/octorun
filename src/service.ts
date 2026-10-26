@@ -12,6 +12,7 @@ import { resolveSecrets } from './config.ts'
 import { githubId, githubObject } from './github-auth.ts'
 import { isOctorunFinding } from './github-publication.ts'
 import { authorizeGitHubCommand, createGitHubAppAuth, createGitHubClient, createGitHubPublisher, createGitHubSnapshotReader, githubDigest, githubRepositoryPath, normalizeGitHubWebhook, parseGitHubCommand, pollGitHubEvents, verifyWebhookSignature } from './github.ts'
+import { cancelledOverview, isCancelledOverview } from './lifecycle.ts'
 import { checkClaudeAuthentication, createClaudeProvider, createOpenAICompatibleProvider, withClaudeReadiness } from './providers.ts'
 import { adversarialReviewPreset, changeSummaryPreset, conversationPreset, createReviewTaskTypes } from './review.ts'
 import { createRunner } from './runner.ts'
@@ -131,6 +132,13 @@ export async function createOctorun(options: OctorunServiceOptions) {
   } })
   const providerBinding = digest({ id: provider.value.id, inputTokenOverhead: provider.value.inputTokenOverhead ?? 256, configuration: config.provider })
   const pinnedReviewTypes = reviewTypes.map(type => type.capabilities.includes('agent:invoke') ? { ...type, version: `${type.version}:${providerBinding}` } : type)
+  const ownsOverview = (run: RunRecord): boolean => {
+    for (const candidate of store.scanRuns({ repository: run.event.repository.fullName, order: 'newest' })) {
+      if (candidate.definition.id === run.definition.id && targetKey(candidate.event) === targetKey(run.event) && candidate.state._tag !== 'Skipped')
+        return candidate.id === run.id
+    }
+    return false
+  }
   const currentPolicy = async (run: RunRecord, resultPublication = false): Promise<Result<RepositoryPolicy>> => {
     const repository = configured(run.event.repository.fullName)
     if (repository._tag === 'Err')
@@ -161,7 +169,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
         return err({ _tag: 'Authorization', message: reason })
       }
     }
-    if (['Queued', 'Running', 'Waiting'].includes(run.state._tag) && (run.event.action === 'command' || run.event.name === 'octorun.conversation')) {
+    if ((resultPublication || ['Queued', 'Running', 'Waiting'].includes(run.state._tag)) && (run.event.action === 'command' || run.event.name === 'octorun.conversation')) {
       const permission = await authorizeGitHubCommand({ command: { _tag: 'Review', full: false }, actor: run.event.actor, repository: repository.value.fullName, resolvePermission: (name, actor) => client.permission(name, actor) })
       if (permission._tag === 'Err')
         return permission
@@ -178,8 +186,11 @@ export async function createOctorun(options: OctorunServiceOptions) {
     if (!repository.value.policy.enabled || !repository.value.policy.capabilities.includes(capability) || !context.run.policy.capabilities.includes(capability))
       return err({ _tag: 'Authorization', message: 'Repository policy no longer permits this GitHub publication.' })
     const current = store.run(context.run.id)
-    if (!current || (['Cancelled', 'Superseded'].includes(current.state._tag) && context.publication.effect._tag !== 'Check'))
+    const cancellation = current !== null && isCancelledOverview(context.publication, current)
+    if (!current || (['Cancelled', 'Superseded'].includes(current.state._tag) && context.publication.effect._tag !== 'Check' && !cancellation))
       return err({ _tag: 'Authorization', message: 'The workflow run no longer permits this publication.' })
+    if (cancellation && !ownsOverview(current))
+      return err({ _tag: 'Authorization', message: 'A newer workflow run owns this overview.' })
     if (context.publication.effect._tag !== 'Check') {
       const grant = await currentPolicy(context.run, true)
       if (grant._tag === 'Err')
@@ -438,7 +449,11 @@ export async function createOctorun(options: OctorunServiceOptions) {
       const effect: PublicationEffect = { _tag: 'Check', repository: run.event.repository.fullName, headSha: run.event.target.headSha, name: `Octorun / ${run.definition.name}`, phase, summary: `${run.definition.name}: ${run.state._tag}.${run.state._tag === 'Failed' ? `\n${run.state.error.message}` : run.state._tag === 'Waiting' ? `\n${run.state.reason}` : ''}` }
       runner.publishSystem(run.id, `check:${digest(effect)}`, effect)
     }
-    if (run.policy.capabilities.includes('github:comment') && ['Queued', 'Running', 'Waiting', 'Failed'].includes(run.state._tag) && ['adversarial-review', 'change-summary'].includes(run.definition.id)) {
+    const cancellation = cancelledOverview(run)
+    if (run.policy.capabilities.includes('github:comment') && cancellation !== null && ownsOverview(run)) {
+      runner.publishSystem(run.id, `overview:${digest(cancellation)}`, cancellation)
+    }
+    else if (run.policy.capabilities.includes('github:comment') && ['Queued', 'Running', 'Waiting', 'Failed'].includes(run.state._tag) && ['adversarial-review', 'change-summary'].includes(run.definition.id) && ownsOverview(run)) {
       const detail = run.state._tag === 'Failed' ? `\n${run.state.error.message}\nInspect this run before requesting another review.` : run.state._tag === 'Waiting' ? `\n${run.state.reason}` : '\nThe result will replace this comment.'
       const effect: PublicationEffect = { _tag: 'Comment', repository: run.event.repository.fullName, number: run.event.target.number, namespace: run.definition.id === 'adversarial-review' ? 'review' : 'change-summary', body: `${run.definition.name}: ${run.state._tag}.\nHead: ${run.event.target.headSha.slice(0, 12)}.${detail}` }
       runner.publishSystem(run.id, `overview:${digest(effect)}`, effect)
