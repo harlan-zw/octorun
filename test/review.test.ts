@@ -1,7 +1,7 @@
-import type { ReviewSnapshot } from '../src/review.ts'
+import type { ReviewChanges, ReviewFinding, ReviewReport, ReviewSnapshot } from '../src/review.ts'
 import type { AgentProvider, AgentRequest, EventEnvelope, JsonValue, PublicationEffect, RunRecord, TaskContext, TaskType, Usage } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
-import { adversarialReviewPreset, conversationPreset, createReviewTaskTypes, findingFingerprint, verifyReviewFindings } from '../src/review.ts'
+import { adversarialReviewPreset, conversationPreset, createReviewTaskTypes, findingFingerprint, parseReviewReport, verifyReviewFindings } from '../src/review.ts'
 
 const headSha = 'a'.repeat(40)
 const baseSha = 'b'.repeat(40)
@@ -27,7 +27,7 @@ const event: EventEnvelope = {
   data: {},
 }
 
-function harness(responses: (string | { error: true })[], previousFingerprints: string[] = [], snapshotValue: ReviewSnapshot = snapshot, options: { inputTokenOverhead?: number, usage?: Usage } = {}) {
+function harness(responses: (string | { error: true })[], previousFingerprints: string[] = [], snapshotValue: ReviewSnapshot = snapshot, options: { inputTokenOverhead?: number, usage?: Usage, previous?: ReviewReport, changes?: ReviewChanges, targetHead?: string } = {}) {
   const effects: PublicationEffect[] = []
   const turns: string[] = []
   const requests: AgentRequest[] = []
@@ -49,13 +49,13 @@ function harness(responses: (string | { error: true })[], previousFingerprints: 
   }
   const types = createReviewTaskTypes({
     provider,
-    snapshots: { read: async () => ({ _tag: 'Ok', value: snapshotValue }) },
-    previousReview: async () => previousFingerprints.length ? { headSha: 'c'.repeat(40), baseSha, fingerprints: previousFingerprints } : null,
+    snapshots: { read: async () => ({ _tag: 'Ok', value: snapshotValue }), changes: async () => ({ _tag: 'Ok', value: options.changes ?? { _tag: 'Changed', paths: ['src/account.ts'] } }) },
+    previousReview: async () => options.previous ?? (previousFingerprints.length ? priorReport([{ ...candidate, id: 'previous', fingerprint: previousFingerprints[0]!, evidenceKind: 'static' }]) : null),
   })
   const definition = adversarialReviewPreset()
   const run: RunRecord = {
     id: 'run',
-    event,
+    event: { ...event, target: { _tag: 'PullRequest', number: 4, headSha: options.targetHead ?? headSha, baseSha } },
     definition,
     definitionDigest: 'digest',
     configuration: { source: 'fixture', sha: baseSha, digest: 'digest' },
@@ -70,7 +70,7 @@ function harness(responses: (string | { error: true })[], previousFingerprints: 
   }
   const context: TaskContext = {
     run,
-    event,
+    event: run.event,
     outputs: {},
     signal: new AbortController().signal,
     task: { id: 'task', definition: definition.tasks[0]!, typeVersion: '1', state: { _tag: 'Running', leaseUntil: event.receivedAt }, attempts: 1, failures: 0, fence: 1, output: null, usage: run.usage, unreservedUsage: run.usage, usageReservations: [], startedAt: event.receivedAt, finishedAt: null },
@@ -97,6 +97,10 @@ function harness(responses: (string | { error: true })[], previousFingerprints: 
   return { execute, context, effects, turns, types, requests, reservations, settlements }
 }
 
+function priorReport(findings: ReviewFinding[] = []): ReviewReport {
+  return { headSha: 'c'.repeat(40), baseSha, scope: { _tag: 'Full', reason: 'initial' }, coverage: 'complete', outcome: findings.length ? 'actionable' : 'clean', findings, fingerprints: findings.map(finding => finding.fingerprint), repeated: 0, rejected: 0, omittedFiles: 0, omittedFindings: 0, previousFingerprints: [] }
+}
+
 async function successful(task: ReturnType<ReturnType<typeof harness>['execute']>): Promise<JsonValue> {
   const result = await task
   expect(result._tag).toBe('Succeeded')
@@ -106,6 +110,138 @@ async function successful(task: ReturnType<ReturnType<typeof harness>['execute']
 }
 
 describe('adversarial review preset', () => {
+  it('reviews only files changed since the last complete review before applying file limits', async () => {
+    const other = { path: 'src/untouched.ts', status: 'modified', truncated: false, patch: '@@ -1 +1 @@\n-before\n+untouched' }
+    const h = harness(['{"findings":[]}', '{"findings":[]}'], [], { ...snapshot, files: [other, ...snapshot.files] }, { previous: priorReport(), changes: { _tag: 'Changed', paths: ['src/account.ts'] } })
+    const selected = await successful(h.execute('review.snapshot', { maxFiles: 1 }))
+    expect(selected).toMatchObject({ scope: { _tag: 'Incremental', sinceHeadSha: 'c'.repeat(40) }, coverage: 'complete', omittedFiles: 0, files: [{ path: 'src/account.ts' }] })
+    await successful(h.execute('review.adversarial', { snapshot: selected }))
+    expect(h.requests.map(request => JSON.parse(request.messages[1]!.content).files.map((file: { path: string }) => file.path))).toEqual([['src/account.ts'], ['src/account.ts']])
+  })
+
+  it('carries untouched actionable findings without another model turn or duplicate review', async () => {
+    const fingerprint = findingFingerprint(candidate)
+    const h = harness([], [], snapshot, { previous: priorReport([{ ...candidate, id: 'previous', fingerprint, evidenceKind: 'static' }]), changes: { _tag: 'Changed', paths: [] } })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    const reviewed = await successful(h.execute('review.adversarial', { snapshot: selected }))
+    const report = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
+    await successful(h.execute('review.publish', { report }))
+    expect(report).toMatchObject({ outcome: 'actionable', repeated: 1, findings: [{ fingerprint }], fingerprints: [fingerprint] })
+    expect(h.turns).toEqual([])
+    expect(h.effects).toMatchObject([{ _tag: 'Comment', body: expect.stringContaining('already reported') }])
+    expect(h.effects).toHaveLength(1)
+  })
+
+  it('retires findings when their file is reverted out of the current pull request', async () => {
+    const fingerprint = findingFingerprint(candidate)
+    const h = harness([], [], { ...snapshot, files: [] }, { previous: priorReport([{ ...candidate, id: 'previous', fingerprint, evidenceKind: 'static' }]), changes: { _tag: 'Changed', paths: ['src/account.ts'] } })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    const reviewed = await successful(h.execute('review.adversarial', { snapshot: selected }))
+    const report = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
+    expect(report).toMatchObject({ outcome: 'clean', findings: [], fingerprints: [] })
+    expect(h.turns).toEqual([])
+  })
+
+  it.each<[string, ReviewReport, ReviewChanges]>([
+    ['base movement', { ...priorReport(), baseSha: 'd'.repeat(40) }, { _tag: 'Changed', paths: [] }],
+    ['incomplete previous coverage', { ...priorReport(), coverage: 'incomplete', outcome: 'incomplete', omittedFiles: 1 }, { _tag: 'Changed', paths: [] }],
+    ['rewritten history', priorReport(), { _tag: 'Full', reason: 'history-diverged' }],
+    ['incomplete comparison', priorReport(), { _tag: 'Full', reason: 'comparison-incomplete' }],
+  ])('falls back to the full pull request after %s', async (_reason, previous, changes) => {
+    const h = harness([], [], snapshot, { previous, changes })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    expect(selected).toMatchObject({ scope: { _tag: 'Full' }, files: [{ path: 'src/account.ts' }], previous: null })
+  })
+
+  it('honours an explicit full review despite a complete incremental baseline', async () => {
+    const h = harness([], [], snapshot, { previous: priorReport(), changes: { _tag: 'Changed', paths: [] } })
+    h.context.event = { ...h.context.event, data: { full: true } }
+    const selected = await successful(h.execute('review.snapshot', {}))
+    expect(selected).toMatchObject({ scope: { _tag: 'Full', reason: 'requested' }, files: [{ path: 'src/account.ts' }], previous: null })
+  })
+
+  it('keeps an untouched finding, retires its fix, and reports its return across successive heads', async () => {
+    const fingerprint = findingFingerprint(candidate)
+    const original = priorReport([{ ...candidate, id: 'previous', fingerprint, evidenceKind: 'static' }])
+    const unrelated = { path: 'src/other.ts', status: 'modified', truncated: false, patch: '@@ -1 +1 @@\n-old\n+new' }
+    const review = async (h: ReturnType<typeof harness>) => {
+      const selected = await successful(h.execute('review.snapshot', {}))
+      const reviewed = await successful(h.execute('review.adversarial', { snapshot: selected }))
+      const report = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
+      await successful(h.execute('review.publish', { report }))
+      return report as unknown as ReviewReport
+    }
+    const unrelatedHead = '1'.repeat(40)
+    const b = harness(['{"findings":[]}', '{"findings":[]}'], [], { ...snapshot, headSha: unrelatedHead, files: [...snapshot.files, unrelated] }, { previous: original, changes: { _tag: 'Changed', paths: [unrelated.path] }, targetHead: unrelatedHead })
+    const bReport = await review(b)
+    expect(bReport).toMatchObject({ outcome: 'actionable', fingerprints: [fingerprint], repeated: 1 })
+    expect(b.effects.filter(effect => effect._tag === 'Review')).toEqual([])
+    const fixedHead = '2'.repeat(40)
+    const c = harness([], [], { ...snapshot, headSha: fixedHead, files: [unrelated] }, { previous: bReport, changes: { _tag: 'Changed', paths: [candidate.path] }, targetHead: fixedHead })
+    const cReport = await review(c)
+    expect(cReport).toMatchObject({ outcome: 'clean', findings: [], fingerprints: [] })
+    const returnedHead = '3'.repeat(40)
+    const d = harness([JSON.stringify({ findings: [candidate] }), '{"findings":[]}', '{"accepted":["correctness-0"]}'], [], { ...snapshot, headSha: returnedHead, files: [...snapshot.files, unrelated] }, { previous: cReport, changes: { _tag: 'Changed', paths: [candidate.path] }, targetHead: returnedHead })
+    const dReport = await review(d)
+    expect(dReport).toMatchObject({ outcome: 'actionable', fingerprints: [fingerprint], repeated: 0 })
+    expect(d.effects.filter(effect => effect._tag === 'Review')).toMatchObject([{ headSha: returnedHead, comments: [{ fingerprint, path: candidate.path }] }])
+  })
+
+  it('marks inherited findings beyond the active finding limit as incomplete', async () => {
+    const carried = Array.from({ length: 49 }, (_, index) => {
+      const finding = { ...candidate, id: `old-${index}`, path: `src/old-${index}.ts` }
+      return { ...finding, fingerprint: findingFingerprint(finding), evidenceKind: 'static' as const }
+    })
+    const added = Array.from({ length: 2 }, (_, index) => ({ ...candidate, id: `new-${index}`, path: `src/new-${index}.ts` }))
+    const fixture = { ...snapshot, files: added.map(finding => ({ ...snapshot.files[0]!, path: finding.path })) }
+    const h = harness([JSON.stringify({ accepted: added.map(finding => finding.id) })], [], fixture, { previous: priorReport(carried), changes: { _tag: 'Changed', paths: added.map(finding => finding.path) } })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    const report = await successful(h.execute('review.verify', { snapshot: selected, review: { candidates: added, reviewers: 2 } })) as unknown as ReviewReport
+    expect(report.coverage).toBe('incomplete')
+    expect(report.omittedFindings).toBe(1)
+    expect(report.findings).toHaveLength(50)
+    expect(report.fingerprints).toHaveLength(50)
+  })
+
+  it('retains uncertain findings when their changed patch exceeds review limits', async () => {
+    const finding = { ...candidate, id: 'previous', fingerprint: findingFingerprint(candidate), evidenceKind: 'static' as const }
+    const h = harness([], [], { ...snapshot, files: [{ ...snapshot.files[0]!, patch: null, truncated: true }] }, { previous: priorReport([finding]), changes: { _tag: 'Changed', paths: [candidate.path] } })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    const reviewed = await successful(h.execute('review.adversarial', { snapshot: selected }))
+    const report = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
+    expect(report).toMatchObject({ coverage: 'incomplete', outcome: 'actionable', fingerprints: [finding.fingerprint], repeated: 1 })
+  })
+
+  it('retires the previous path when a renamed file is reviewed without that defect', async () => {
+    const finding = { ...candidate, id: 'previous', fingerprint: findingFingerprint(candidate), evidenceKind: 'static' as const }
+    const h = harness(['{"findings":[]}', '{"findings":[]}'], [], { ...snapshot, files: [{ ...snapshot.files[0]!, path: 'src/renamed.ts', previousPath: candidate.path }] }, { previous: priorReport([finding]), changes: { _tag: 'Changed', paths: [candidate.path, 'src/renamed.ts'] } })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    const reviewed = await successful(h.execute('review.adversarial', { snapshot: selected }))
+    const report = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
+    expect(report).toMatchObject({ coverage: 'complete', outcome: 'clean', findings: [], fingerprints: [] })
+  })
+
+  it('does not send inherited finding bodies to reviewer turns', async () => {
+    const privateBody = 'This previous finding body is irrelevant to the changed file.'
+    const finding = { ...candidate, id: 'previous', body: privateBody, fingerprint: findingFingerprint(candidate), evidenceKind: 'static' as const }
+    const other = { path: 'src/other.ts', status: 'modified', truncated: false, patch: '@@ -1 +1 @@\n-old\n+new' }
+    const h = harness(['{"findings":[]}', '{"findings":[]}'], [], { ...snapshot, files: [...snapshot.files, other] }, { previous: priorReport([finding]), changes: { _tag: 'Changed', paths: [other.path] } })
+    const selected = await successful(h.execute('review.snapshot', {}))
+    const reviewed = await successful(h.execute('review.adversarial', { snapshot: selected }))
+    const report = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
+    expect(h.turns.every(turn => !turn.includes(privateBody))).toBe(true)
+    expect(report).toMatchObject({ findings: [{ body: privateBody }] })
+  })
+
+  it.each([
+    { ...priorReport(), outcome: 'actionable' },
+    { ...priorReport(), coverage: 'complete', omittedFiles: 1 },
+    { ...priorReport(), coverage: 'complete', omittedFindings: 1 },
+    { ...priorReport(), coverage: 'incomplete', outcome: 'clean' },
+    { ...priorReport(), repeated: 1 },
+  ])('rejects persisted review evidence that contradicts its findings or coverage', (report) => {
+    expect(parseReviewReport(report)).toMatchObject({ _tag: 'Err', error: { _tag: 'Configuration' } })
+  })
   it('reviews, independently checks, deduplicates, and publishes one anchored finding', async () => {
     const h = harness([
       JSON.stringify({ findings: [candidate, { ...candidate, evidence: 'invented evidence' }] }),

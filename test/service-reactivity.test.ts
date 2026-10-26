@@ -232,18 +232,17 @@ describe('controls with retained history', () => {
     expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Latest target review: Succeeded.')])
   })
 
-  it('uses the newest successful review beyond retained unrelated history', async () => {
+  it('uses complete persisted coverage beyond retained unrelated history', async () => {
     const test = await setup()
-    const history = seedHistory(test.service())
-    const id = 'newest-target-review'
-    const previousHead = 'd'.repeat(40)
-    test.service().store.createRun({ ...history, id, event: { ...history.event, target: { _tag: 'PullRequest', number: 1, headSha: previousHead, baseSha: base } }, tasks: [{ id: 'verify', definition: { id: 'verify', uses: 'review.verify', with: {} }, typeVersion: '1', state: { _tag: 'Succeeded' }, attempts: 1, failures: 0, fence: 1, output: { headSha: previousHead, baseSha: base, fingerprints: ['latest-finding'] }, usage: history.usage, unreservedUsage: history.usage, usageReservations: [], startedAt: history.startedAt, finishedAt: history.finishedAt }] }, { trigger: id, group: id })
-    const started = await test.service().run({ repository: repository.fullName, number: 1 })
+    expect(await test.service().command('run', { repository: repository.fullName, number: 1, requestId: 'complete-before-history' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    seedHistory(test.service())
+    const started = await test.service().run({ repository: repository.fullName, number: 1, requestId: 'after-history' })
     if (started._tag === 'Err' || typeof started.value !== 'object' || started.value === null || Array.isArray(started.value) || typeof started.value.runId !== 'string')
       throw new Error('The review did not start.')
     await test.service().settle()
     const selection = test.service().runner.inspect(started.value.runId)?.tasks.find(task => task.definition.uses === 'review.snapshot')?.output
-    expect(selection).toMatchObject({ previous: { headSha: previousHead, fingerprints: ['latest-finding'] } })
+    expect(selection).toMatchObject({ scope: { _tag: 'Incremental', sinceHeadSha: head }, files: [], previous: { headSha: head, coverage: 'complete', fingerprints: [] } })
+    expect(test.calls()).toBe(2)
   })
 
   it('recovers the terminal check beyond the retained history limit', async () => {

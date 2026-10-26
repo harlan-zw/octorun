@@ -1,13 +1,13 @@
 import type { OperatorConfig } from '../src/config.ts'
 import type { GitHubClient, PullRequestSnapshot } from '../src/github.ts'
 import type { OctorunService } from '../src/service.ts'
-import type { AgentProvider } from '../src/types.ts'
+import type { AgentProvider, AgentRequest } from '../src/types.ts'
 import { createHmac } from 'node:crypto'
 import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { changeSummaryPreset } from '../src/review.ts'
+import { adversarialReviewPreset, changeSummaryPreset } from '../src/review.ts'
 import { createOctorun, parseRepositoryWorkflows } from '../src/service.ts'
 import { ok } from '../src/types.ts'
 
@@ -23,7 +23,7 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).reverse().map(close => close()))
 })
 
-async function setup(options: { failProvider?: boolean, sourceText?: string, omitProviderKey?: boolean } = {}) {
+async function setup(options: { failProvider?: boolean, sourceText?: string, omitProviderKey?: boolean, generate?: AgentProvider['generate'] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'octorun-service-'))
   const config: OperatorConfig = { version: 1, stateDir, host: '127.0.0.1', port: 0, handle: 'octorun', github: { appId: '7', privateKeyEnv: 'APP_KEY', webhookSecretEnv: 'WEBHOOK_SECRET', apiUrl: 'https://api.github.com' }, provider: { _tag: 'OpenAICompatible', baseUrl: 'https://provider.example/v1', model: 'test-model', apiKeyEnv: 'API_KEY', timeoutMs: 1000, maxResponseBytes: 1024, maxInputCharacters: 100000 }, repositories: [{ ...repo, policy: { enabled: true, capabilities: ['repository:read', 'agent:invoke', 'github:comment', 'github:review', 'github:check'], maxConcurrency: 2 }, workflowSource: options.sourceText ? { _tag: 'Repository', path: '.github/octorun.yml' } : { _tag: 'Presets', presets: ['adversarial-review'] } }], pollIntervalMs: 0, limits: { bodyBytes: 1024 * 1024, requestsPerMinute: 100, concurrency: 2 } }
   let currentHead = head
@@ -32,6 +32,7 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
   let updatedAt = now.toISOString()
   let reads = 0
   let providerCalls = 0
+  const providerRequests: AgentRequest[] = []
   let nextId = 100
   let permission: 'read' | 'write' = 'write'
   let permissionChecks = 0
@@ -103,6 +104,9 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
   }
   const provider: AgentProvider = { id: 'test-provider', inputTokenOverhead: 256, async generate(request) {
     providerCalls++
+    providerRequests.push(request)
+    if (options.generate)
+      return options.generate(request)
     if (options.failProvider)
       return { _tag: 'Err', error: { _tag: 'Permanent', message: 'The provider rejected this request.' } }
     return ok({ text: request.messages[0]!.content.includes('release') ? 'Update the input parser.' : '{"findings":[]}', usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
@@ -122,7 +126,7 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
     const body = JSON.stringify(payload)
     return service.handleWebhook({ deliveryId, event, body, signature: `sha256=${createHmac('sha256', secret).update(body).digest('hex')}` })
   }
-  return { config, client, comments, reviews, checkRuns, inputComments, snapshot, webhook, service: () => service, reads: () => reads, providerCalls: () => providerCalls, permissionChecks: () => permissionChecks, setDraft: (value: boolean, advanceMs = 1000) => {
+  return { config, client, comments, reviews, checkRuns, inputComments, snapshot, webhook, providerRequests, service: () => service, reads: () => reads, providerCalls: () => providerCalls, permissionChecks: () => permissionChecks, setDraft: (value: boolean, advanceMs = 1000) => {
     draft = value
     clockMs += advanceMs
     updatedAt = new Date(clockMs).toISOString()
@@ -255,6 +259,109 @@ describe('reactive service composition', () => {
     expect(test.providerCalls()).toBe(2)
     expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('No actionable findings')])
     expect(test.checkRuns.map(check => ({ status: check.status, conclusion: check.conclusion }))).toEqual([{ status: 'completed', conclusion: 'success' }])
+  })
+
+  it('reuses persisted complete coverage for a custom workflow after restart', async () => {
+    const test = await setup()
+    test.config.repositories[0]!.workflowSource = { _tag: 'Inline', definitions: [{ ...adversarialReviewPreset(), id: 'custom-review' }] }
+    const files = [
+      { path: 'src/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', status: 'modified', truncated: false, additions: 1, deletions: 1 },
+      { path: 'src/b.ts', patch: '@@ -1 +1 @@\n-before\n+after', status: 'modified', truncated: false, additions: 1, deletions: 1 },
+    ]
+    test.client.files = async () => ok(files)
+    const request = test.client.request
+    test.client.request = async (repository, access, path, options) => path.includes('/compare/')
+      ? ok({ status: 'ahead', base_commit: { sha: head }, merge_base_commit: { sha: head }, files: [{ filename: 'src/b.ts', status: 'modified' }] })
+      : request(repository, access, path, options)
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'custom-review', requestId: 'complete-before-restart' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    await test.restart()
+    test.moveHead('c'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'custom-review', requestId: 'incremental-after-restart' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerRequests.slice(2).map(request => JSON.parse(request.messages[1]!.content).files.map((file: { path: string }) => file.path))).toEqual([['src/b.ts'], ['src/b.ts']])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Incremental review of 1 changed path since \`${head.slice(0, 12)}\``)])
+  })
+
+  it('reuses a complete full-command review for the next empty commit', async () => {
+    const test = await setup()
+    const request = test.client.request
+    test.client.request = async (repository, access, path, options) => path.includes('/compare/')
+      ? ok({ status: 'ahead', base_commit: { sha: head }, merge_base_commit: { sha: head }, files: [] })
+      : request(repository, access, path, options)
+    await test.webhook('issue_comment', issueComment('@octorun review full'), 'full-review-command')
+    await test.service().settle()
+    expect(test.providerCalls()).toBe(2)
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Full pull request review.')])
+    test.moveHead('c'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'empty-after-full-command' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerCalls()).toBe(2)
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Incremental review of 0 changed paths since \`${head.slice(0, 12)}\``)])
+  })
+
+  it('keeps separate review chains on full scope instead of sharing findings', async () => {
+    const test = await setup({ generate: async (request) => {
+      const instructions = request.messages[0]!.content
+      const text = instructions.includes('Independently challenge')
+        ? JSON.stringify({ accepted: (JSON.parse(request.messages[1]!.content).findings as { id: string }[]).map(finding => finding.id) })
+        : JSON.stringify({ findings: [{ path: instructions.includes('correctness specialist') ? 'src/a.ts' : 'src/b.ts', side: 'RIGHT', line: 1, title: 'A concrete defect', body: 'The changed value rejects a valid input.', evidence: instructions.includes('correctness specialist') ? 'new' : 'after', severity: 'high', confidence: 95 }] })
+      return ok({ text, usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
+    } })
+    const workflow = adversarialReviewPreset()
+    test.config.repositories[0]!.workflowSource = { _tag: 'Inline', definitions: [{ ...workflow, id: 'separate-reviews', tasks: ['correctness', 'security'].flatMap(role => [
+      { id: `${role}-snapshot`, uses: 'review.snapshot', with: {} },
+      { id: `${role}-reviewers`, uses: 'review.adversarial', with: { snapshot: { $ref: `tasks.${role}-snapshot.output` }, roles: [role] } },
+      { id: `${role}-verify`, uses: 'review.verify', with: { snapshot: { $ref: `tasks.${role}-snapshot.output` }, review: { $ref: `tasks.${role}-reviewers.output` } } },
+    ]) }] }
+    test.client.files = async () => ok([
+      { path: 'src/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', status: 'modified', truncated: false, additions: 1, deletions: 1 },
+      { path: 'src/b.ts', patch: '@@ -1 +1 @@\n-before\n+after', status: 'modified', truncated: false, additions: 1, deletions: 1 },
+    ])
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'separate-reviews', requestId: 'first-separate-reviews' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'separate-reviews', requestId: 'second-separate-reviews' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    const latest = test.service().runner.runs({ order: 'newest' })[0]!
+    expect(latest.tasks.find(task => task.definition.id === 'security-verify')?.output).toMatchObject({ scope: { _tag: 'Full' }, findings: [{ path: 'src/b.ts' }] })
+    expect(latest.tasks.find(task => task.definition.id === 'correctness-verify')?.output).toMatchObject({ scope: { _tag: 'Full' }, findings: [{ path: 'src/a.ts' }] })
+  })
+
+  it('requires new coverage when the configured reviewers change after a full command', async () => {
+    const test = await setup()
+    const workflow = adversarialReviewPreset()
+    test.config.repositories[0]!.workflowSource = { _tag: 'Inline', definitions: [workflow] }
+    await test.webhook('issue_comment', issueComment('@octorun review full'), 'full-before-configuration-change')
+    await test.service().settle()
+    workflow.tasks.find(task => task.uses === 'review.adversarial')!.with.roles = ['security']
+    test.moveHead('c'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'changed-reviewers-after-full' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerCalls()).toBe(3)
+    expect(JSON.parse(test.providerRequests.at(-1)!.messages[1]!.content)).toMatchObject({ scope: { _tag: 'Full', reason: 'initial' }, files: [{ path: 'src/a.ts' }] })
+  })
+
+  it('does not reuse coverage after the provider binding changes', async () => {
+    const test = await setup()
+    await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'old-provider-binding' })
+    test.config.provider.model = 'different-model'
+    await test.restart()
+    test.moveHead('c'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'new-provider-binding' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerRequests.slice(2).map(request => JSON.parse(request.messages[1]!.content).scope)).toEqual([{ _tag: 'Full', reason: 'initial' }, { _tag: 'Full', reason: 'initial' }])
+  })
+
+  it('falls back to a full review after the newest review has incomplete coverage', async () => {
+    const test = await setup()
+    const request = test.client.request
+    let comparisonBase = head
+    test.client.request = async (repository, access, path, options) => path.includes('/compare/')
+      ? ok({ status: 'ahead', base_commit: { sha: comparisonBase }, merge_base_commit: { sha: comparisonBase }, files: [{ filename: 'src/a.ts', status: 'modified' }] })
+      : request(repository, access, path, options)
+    await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'first-complete' })
+    const files = test.client.files
+    test.client.files = async () => ok([{ path: 'src/a.ts', patch: null, status: 'modified', truncated: true, additions: 1, deletions: 1 }])
+    test.moveHead('c'.repeat(40))
+    await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'second-incomplete' })
+    comparisonBase = 'c'.repeat(40)
+    test.client.files = files
+    test.moveHead('d'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'third-must-be-full' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerRequests.slice(2).map(request => JSON.parse(request.messages[1]!.content).scope)).toEqual([{ _tag: 'Full', reason: 'incomplete-previous-review' }, { _tag: 'Full', reason: 'incomplete-previous-review' }])
   })
 
   it('binds a manual request ID to its first accepted head', async () => {
