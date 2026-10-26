@@ -1,8 +1,10 @@
 import type { Capability, RepositoryPolicy, RepositoryRef, Result, WorkflowDefinition } from './types.ts'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createPrivateKey } from 'node:crypto'
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { parseDocument, stringify } from 'yaml'
+import { createGitHubAppAuth, createGitHubClient } from './github.ts'
 import { err, ok } from './types.ts'
 import { parseWorkflow } from './workflow.ts'
 
@@ -24,6 +26,10 @@ export type ProviderConfiguration
 export type InitialProviderConfiguration
   = | { _tag: 'OpenAICompatible', model: string, baseUrl?: string }
     | { _tag: 'Claude', model: string }
+
+export type InitialRepositoryIdentity
+  = | { _tag: 'Discover' }
+    | { _tag: 'Explicit', repositoryId: number, installationId: number }
 
 export interface OperatorConfig {
   version: 1
@@ -275,16 +281,44 @@ export function resolveSecrets(config: OperatorConfig, env: NodeJS.ProcessEnv = 
   return ok({ privateKey: env[config.github.privateKeyEnv]!, apiKey: options.requireProvider === false || config.provider._tag === 'Claude' ? null : env[config.provider.apiKeyEnv]!, webhookSecret })
 }
 
-export async function initConfig(options: { path: string, repository: string, repositoryId: number, installationId: number, appId: string, provider: InitialProviderConfiguration }): Promise<Result<{ path: string }>> {
+export async function initConfig(options: { path: string, repository: string, identity: InitialRepositoryIdentity, appId: string, provider: InitialProviderConfiguration }, dependencies: { env?: NodeJS.ProcessEnv, fetch?: typeof globalThis.fetch } = {}): Promise<Result<{ path: string }>> {
+  const exists = await lstat(options.path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT')
+      return false
+    throw error
+  })
+  if (exists)
+    return invalid('Configuration already exists. Choose another --output path.')
   const raw = {
     version: 1,
     github: { appId: options.appId, privateKeyEnv: 'OCTORUN_GITHUB_PRIVATE_KEY', webhookSecretEnv: 'OCTORUN_WEBHOOK_SECRET' },
     provider: options.provider._tag === 'Claude' ? options.provider : { _tag: 'OpenAICompatible', baseUrl: options.provider.baseUrl ?? 'https://api.openai.com/v1', model: options.provider.model, apiKeyEnv: 'OCTORUN_API_KEY' },
-    repositories: [{ id: options.repositoryId, fullName: options.repository, installationId: options.installationId }],
+    repositories: [{ id: options.identity._tag === 'Explicit' ? options.identity.repositoryId : 1, fullName: options.repository, installationId: options.identity._tag === 'Explicit' ? options.identity.installationId : 1 }],
   }
   const parsed = parseConfig(raw, { configDir: dirname(resolve(options.path)) })
   if (parsed._tag === 'Err')
     return parsed
+  if (options.identity._tag === 'Discover') {
+    const privateKey = (dependencies.env ?? process.env).OCTORUN_GITHUB_PRIVATE_KEY
+    if (!privateKey?.trim())
+      return invalid('Set OCTORUN_GITHUB_PRIVATE_KEY before discovering repository IDs. For offline setup, provide both numeric IDs.')
+    const key = await Promise.resolve().then(() => createPrivateKey(privateKey)).then(ok).catch(() => invalid('GitHub App authentication failed. Check --app-id and OCTORUN_GITHUB_PRIVATE_KEY.'))
+    if (key._tag === 'Err')
+      return key
+    if (key.value.asymmetricKeyType !== 'rsa')
+      return invalid('GitHub App authentication needs an RSA private key. Check OCTORUN_GITHUB_PRIVATE_KEY.')
+    const fetch = dependencies.fetch ?? globalThis.fetch
+    const auth = createGitHubAppAuth({ appId: Number(options.appId), privateKey, fetch })
+    const identity = await auth.identity()
+    if (identity._tag === 'Err')
+      return identity
+    const discovered = await createGitHubClient({ auth, fetch }).repository(options.repository)
+    if (discovered._tag === 'Err')
+      return discovered
+    if (discovered.value.archived)
+      return invalid('This repository is archived. Choose an active repository before running Octorun.')
+    raw.repositories = [{ id: discovered.value.ref.id, fullName: discovered.value.ref.fullName, installationId: discovered.value.ref.installationId }]
+  }
   await mkdir(dirname(resolve(options.path)), { recursive: true, mode: 0o700 })
   return writeFile(options.path, stringify(raw), { mode: 0o600, flag: 'wx' }).then(() => ok({ path: resolve(options.path) })).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'EEXIST')
