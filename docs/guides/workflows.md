@@ -25,6 +25,43 @@ The initial CLI supports repository reads, agent requests, comments, reviews, an
 It does not enable shell execution, branch writes, or merges.
 A repository definition cannot expand that policy.
 
+### Review later commits
+
+After a complete review, the next review selects files changed since that reviewed commit.
+Each selected file uses its current pull request patch, including unchanged hunks within that file.
+Files unchanged since the previous review do not enter the new agent requests.
+Their actionable findings remain in the result without another inline comment.
+
+Octorun checks commit ancestry before reusing coverage.
+The previous review must match the base commit, workflow, configuration, and task versions.
+A changed provider configuration also requires a full review.
+The newest incomplete review prevents reuse of an older complete review.
+
+| Condition | Review scope |
+| --- | --- |
+| Complete matching review and proven ancestry | Changed files since that reviewed commit |
+| Same reviewed commit or an empty change | Keep previous findings without an agent request |
+| Rewritten history, changed base, or unavailable comparison | Full pull request |
+| Incomplete previous coverage or capped comparison | Full pull request |
+| `@octorun review full` | Full pull request, without inherited findings |
+
+Use your configured handle instead of `@octorun`.
+The overview identifies the scope and reviewed commit.
+Changed files are reviewed again, so a fixed finding disappears when the review no longer confirms it.
+If the defect returns later, Octorun can publish it again.
+Incomplete patches retain uncertain earlier findings and mark coverage incomplete.
+
+GitHub caps comparison file lists at 300 files.
+Octorun conservatively uses a full review when that list reaches the cap.
+See [GitHub's comparison contract](https://docs.github.com/en/rest/commits/commits#compare-two-commits).
+
+For custom hosts, `SnapshotReader.read` supplies the full current pull request snapshot.
+Its optional `changes` method supplies complete changed paths or a tagged full-review fallback.
+Without that method, the host uses full reviews.
+`PreviousReview` now contains a complete `ReviewReport`, including findings, coverage, and scope.
+Use `parseReviewReport` before reusing persisted results.
+Earlier stored results without this evidence receive a full review. Their run history remains available.
+
 ## Load trusted repository definitions
 
 Set a repository workflow source:

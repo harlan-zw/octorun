@@ -260,6 +260,40 @@ describe('gitHub App authentication', () => {
     move = () => test.moveHead('c'.repeat(40))
     expect(await createGitHubSnapshotReader(test.client).read('acme/project', { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base }, new AbortController().signal)).toMatchObject({ _tag: 'Err', error: { message: 'The pull request changed during snapshot acquisition.' } })
   })
+
+  it('compares pinned commits with repository read access and retains both rename paths', async () => {
+    const previous = 'c'.repeat(40)
+    const path = `/repos/acme/project/compare/${previous}...${head}?per_page=1&page=1`
+    const test = await fixture(request => request.path === path ? { body: { status: 'ahead', base_commit: { sha: previous }, merge_base_commit: { sha: previous }, commits: [{ sha: head }], files: [{ filename: 'src/renamed.ts', previous_filename: 'src/a.ts', status: 'renamed' }] } } : undefined)
+    expect(await createGitHubSnapshotReader(test.client).changes('acme/project', { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base }, previous, new AbortController().signal)).toEqual({ _tag: 'Ok', value: { _tag: 'Changed', paths: ['src/renamed.ts', 'src/a.ts'] } })
+    expect(test.requests.filter(request => request.path.endsWith('/access_tokens')).map(request => request.body.permissions)).toEqual([{ metadata: 'read', contents: 'read', pull_requests: 'read', issues: 'read', checks: 'read' }])
+  })
+
+  it.each([
+    ['diverged history', { status: 'diverged', base_commit: { sha: 'c'.repeat(40) }, merge_base_commit: { sha: base }, files: [] }, 'history-diverged'],
+    ['unproved ancestry', { status: 'ahead', base_commit: { sha: 'c'.repeat(40) }, merge_base_commit: { sha: base }, files: [] }, 'history-diverged'],
+    ['missing files', { status: 'ahead', base_commit: { sha: 'c'.repeat(40) }, merge_base_commit: { sha: 'c'.repeat(40) } }, 'comparison-incomplete'],
+    ['capped file listing', { status: 'ahead', base_commit: { sha: 'c'.repeat(40) }, merge_base_commit: { sha: 'c'.repeat(40) }, files: Array.from({ length: 300 }, (_, index) => ({ filename: `src/${index}.ts`, status: 'modified' })) }, 'comparison-incomplete'],
+  ])('uses a full review after %s', async (_name, body, reason) => {
+    const test = await fixture(request => request.path.includes('/compare/') ? { body } : undefined)
+    expect(await createGitHubSnapshotReader(test.client).changes('acme/project', { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base }, 'c'.repeat(40), new AbortController().signal)).toEqual({ _tag: 'Ok', value: { _tag: 'Full', reason } })
+  })
+
+  it.each([404, 422])('uses a full review when comparison returns HTTP %s', async (status) => {
+    const test = await fixture(request => request.path.includes('/compare/') ? { status, body: {} } : undefined)
+    expect(await createGitHubSnapshotReader(test.client).changes('acme/project', { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base }, 'c'.repeat(40), new AbortController().signal)).toEqual({ _tag: 'Ok', value: { _tag: 'Full', reason: 'history-unavailable' } })
+  })
+
+  it('does not hide a denied comparison behind a full review', async () => {
+    const test = await fixture(request => request.path.includes('/compare/') ? { status: 403, body: {} } : undefined)
+    expect(await createGitHubSnapshotReader(test.client).changes('acme/project', { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base }, 'c'.repeat(40), new AbortController().signal)).toMatchObject({ _tag: 'Err', error: { _tag: 'Authorization' } })
+  })
+
+  it('does not permit arbitrary dot segments through the comparison route', async () => {
+    const test = await fixture()
+    expect(await test.client.request('acme/project', 'read', '/repos/acme/project/compare/../../private')).toMatchObject({ _tag: 'Err', error: { _tag: 'Configuration' } })
+    expect(test.requests).toEqual([])
+  })
 })
 
 describe('gitHub publication reconciliation', () => {

@@ -14,7 +14,7 @@ import { isOctorunFinding } from './github-publication.ts'
 import { authorizeGitHubCommand, createGitHubAppAuth, createGitHubClient, createGitHubPublisher, createGitHubSnapshotReader, githubDigest, githubRepositoryPath, normalizeGitHubWebhook, parseGitHubCommand, pollGitHubEvents, verifyWebhookSignature } from './github.ts'
 import { cancelledOverview, isCancelledOverview } from './lifecycle.ts'
 import { checkClaudeAuthentication, createClaudeProvider, createOpenAICompatibleProvider, withClaudeReadiness } from './providers.ts'
-import { adversarialReviewPreset, changeSummaryPreset, conversationPreset, createReviewTaskTypes } from './review.ts'
+import { adversarialReviewPreset, changeSummaryPreset, conversationPreset, createReviewTaskTypes, parseReviewReport } from './review.ts'
 import { createRunner } from './runner.ts'
 import { openStore } from './store.ts'
 import { err, ok, parseJsonValue } from './types.ts'
@@ -121,14 +121,18 @@ export async function createOctorun(options: OctorunServiceOptions) {
   const reviewTypes = createReviewTaskTypes({ provider: provider.value, snapshots: createGitHubSnapshotReader(client), previousReview: async (context) => {
     let previous: RunRecord | undefined
     for (const run of store.scanRuns({ repository: context.event.repository.fullName, states: ['Succeeded'], order: 'newest' })) {
-      if (run.id !== context.run.id && targetKey(run.event) === targetKey(context.event) && run.definition.id === 'adversarial-review') {
+      if (run.id !== context.run.id && targetKey(run.event) === targetKey(context.event) && run.definition.id === context.run.definition.id) {
         previous = run
         break
       }
     }
-    const output = previous?.tasks.find(task => task.definition.uses === 'review.verify')?.output
-    const report = githubObject(output)
-    return report && typeof report.headSha === 'string' && typeof report.baseSha === 'string' && Array.isArray(report.fingerprints) && report.fingerprints.every(value => typeof value === 'string') ? { headSha: report.headSha, baseSha: report.baseSha, fingerprints: report.fingerprints as string[] } : null
+    if (!previous || previous.event.repository.id !== context.event.repository.id || previous.event.repository.installationId !== context.event.repository.installationId
+      || previous.definitionDigest !== context.run.definitionDigest || previous.configuration.digest !== context.run.configuration.digest
+      || previous.tasks.some(task => context.run.tasks.find(current => current.definition.id === task.definition.id)?.typeVersion !== task.typeVersion)) {
+      return null
+    }
+    const report = parseReviewReport(previous.tasks.find(task => task.definition.uses === 'review.verify')?.output)
+    return report._tag === 'Ok' ? report.value : null
   } })
   const providerBinding = digest({ id: provider.value.id, inputTokenOverhead: provider.value.inputTokenOverhead ?? 256, configuration: config.provider })
   const pinnedReviewTypes = reviewTypes.map(type => type.capabilities.includes('agent:invoke') ? { ...type, version: `${type.version}:${providerBinding}` } : type)

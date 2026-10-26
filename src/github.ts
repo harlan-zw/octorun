@@ -1,5 +1,6 @@
 import type { GitHubAccess, GitHubAppAuth } from './github-auth.ts'
 import type { RepositoryPermission } from './github-commands.ts'
+import type { ReviewChanges } from './review.ts'
 import type { Actor, EventTarget, RepositoryRef, Result } from './types.ts'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
@@ -78,7 +79,8 @@ export function createGitHubClient(options: { auth: GitHubAppAuth, fetch?: typeo
     const expected = `${githubRepositoryPath(repository)}/`
     if (path !== expected.slice(0, -1) && !path.startsWith(expected) && !/^\/users\/[^/?]+$/.test(path))
       return err({ _tag: 'Authorization', message: 'The GitHub route leaves the configured repository.' })
-    if (path.includes('..') || path.includes('\\') || path.includes('#'))
+    const pinnedComparison = /^compare\/(?:[a-f0-9]{40}|[a-f0-9]{64})\.\.\.(?:[a-f0-9]{40}|[a-f0-9]{64})\?per_page=1&page=1$/i.test(path.slice(expected.length))
+    if ((path.includes('..') && !pinnedComparison) || path.includes('\\') || path.includes('#'))
       return err({ _tag: 'Configuration', message: 'The GitHub route contains an invalid path.' })
     for (let attempt = 0; attempt < 2; attempt++) {
       const credential = await options.auth.token(repository, access, requestOptions.signal)
@@ -227,6 +229,36 @@ export function createGitHubClient(options: { auth: GitHubAppAuth, fetch?: typeo
 /** Read APIs carry no repository execution or write capability. */
 export function createGitHubSnapshotReader(client: GitHubClient) {
   return {
+    async changes(repository: string, target: Extract<EventTarget, { _tag: 'PullRequest' }>, sinceHeadSha: string, signal: AbortSignal): Promise<Result<ReviewChanges>> {
+      if (signal.aborted)
+        return err(githubTransportFailure(signal))
+      if (![sinceHeadSha, target.headSha].every(value => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)))
+        return err({ _tag: 'Configuration', message: 'Review comparisons require pinned commit IDs.' })
+      if (sinceHeadSha === target.headSha)
+        return ok({ _tag: 'Changed', paths: [] })
+      const compared = await client.request(repository, 'read', `${githubRepositoryPath(repository)}/compare/${sinceHeadSha}...${target.headSha}?per_page=1&page=1`, { signal })
+      if (compared._tag === 'Err')
+        return ['GitHub returned HTTP 404.', 'GitHub returned HTTP 422.'].includes(compared.error.message) ? ok({ _tag: 'Full', reason: 'history-unavailable' }) : compared
+      const value = githubObject(compared.value)
+      if (!value || !['ahead', 'identical'].includes(String(value.status)) || githubObject(value.base_commit)?.sha !== sinceHeadSha || githubObject(value.merge_base_commit)?.sha !== sinceHeadSha)
+        return ok({ _tag: 'Full', reason: 'history-diverged' })
+      // GitHub includes changed files only on the first page and caps that list at 300.
+      if (!Array.isArray(value.files) || value.files.length >= 300)
+        return ok({ _tag: 'Full', reason: 'comparison-incomplete' })
+      const paths = new Set<string>()
+      const safePath = (path: unknown): path is string => typeof path === 'string' && path.length > 0 && path.length <= 1024 && !path.startsWith('/') && !path.split('/').includes('..') && ![...path].some(character => character.charCodeAt(0) < 32)
+      for (const raw of value.files) {
+        const file = githubObject(raw)
+        if (!file || !safePath(file.filename) || !['added', 'removed', 'modified', 'renamed', 'copied', 'changed', 'unchanged'].includes(String(file.status))
+          || (file.status === 'renamed' && !safePath(file.previous_filename))) {
+          return ok({ _tag: 'Full', reason: 'comparison-incomplete' })
+        }
+        paths.add(file.filename)
+        if (file.status === 'renamed' && typeof file.previous_filename === 'string')
+          paths.add(file.previous_filename)
+      }
+      return ok({ _tag: 'Changed', paths: [...paths] })
+    },
     async read(repository: string, target: Extract<EventTarget, { _tag: 'PullRequest' }>, signal: AbortSignal) {
       const before = await client.snapshot(repository, target.number, signal)
       if (before._tag === 'Err')
