@@ -15,9 +15,10 @@ export function isOctorunFinding(value: unknown, actorId: number): boolean {
   return ownedBy(value, actorId) && !githubId(comment?.in_reply_to_id) && typeof comment?.body === 'string'
     && /\n<!-- octorun:finding:[a-f0-9]{64} -->\n<!-- octorun:publication:[a-f0-9]{64} -->$/.test(comment.body.trimEnd())
 }
-function hasFinding(value: unknown, actorId: number, fingerprint: string, path: string): boolean {
+function hasFinding(value: unknown, actorId: number, fingerprint: string, path: string, headSha: string): boolean {
   const object = githubObject(value)
-  return ownedBy(value, actorId) && !githubId(object?.in_reply_to_id) && object?.path === path && typeof object.body === 'string' && object.body.trimEnd().split('\n').at(-2) === findingMarker(fingerprint)
+  return ownedBy(value, actorId) && !githubId(object?.in_reply_to_id) && object?.path === path && object.original_commit_id === headSha
+    && typeof object.body === 'string' && object.body.trimEnd().split('\n').at(-2) === findingMarker(fingerprint)
 }
 function receipt(value: unknown, extra: Record<string, string | number | string[]> = {}): Result<PublicationReceipt> {
   const object = githubObject(value)
@@ -117,11 +118,12 @@ export function createGitHubPublisher(options: { client: GitHubClient, nativeChe
     const match = existing.value.objects.find(object => matches(context.publication.effect, object, context, existing.value.botId))
     if (!match)
       return ok(null)
-    if (context.publication.effect._tag === 'Review') {
-      const comments = await client.paginate(context.publication.effect.repository, `${githubRepositoryPath(context.publication.effect.repository)}/pulls/${context.publication.effect.number}/comments`, context.signal)
+    const effect = context.publication.effect
+    if (effect._tag === 'Review') {
+      const comments = await client.paginate(effect.repository, `${githubRepositoryPath(effect.repository)}/pulls/${effect.number}/comments`, context.signal)
       if (comments._tag === 'Err')
         return comments
-      const missing = context.publication.effect.comments.filter(comment => !comments.value.some(raw => hasFinding(raw, existing.value.botId, comment.fingerprint, comment.path)))
+      const missing = effect.comments.filter(comment => !comments.value.some(raw => hasFinding(raw, existing.value.botId, comment.fingerprint, comment.path, effect.headSha)))
       if (missing.length > 0)
         return ok(null)
     }
@@ -201,7 +203,7 @@ export function createGitHubPublisher(options: { client: GitHubClient, nativeChe
       const existing = await client.paginate(effect.repository, `${root}/pulls/${effect.number}/comments`, context.signal)
       if (existing._tag === 'Err')
         return existing
-      const comments = effect.comments.filter(comment => !existing.value.some(raw => hasFinding(raw, bot.value.id, comment.fingerprint, comment.path)))
+      const comments = effect.comments.filter(comment => !existing.value.some(raw => hasFinding(raw, bot.value.id, comment.fingerprint, comment.path, effect.headSha)))
       path = `${root}/pulls/${effect.number}/reviews`
       body = { commit_id: effect.headSha, event: 'COMMENT', body: bodyWith(effect.body, marker), comments: comments.map(comment => ({ path: comment.path, line: comment.line, side: comment.side, ...(comment.startLine === undefined ? {} : { start_line: comment.startLine, start_side: comment.side }), body: bodyWith(comment.body, findingMarker(comment.fingerprint), marker) })) }
     }

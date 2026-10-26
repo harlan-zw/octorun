@@ -89,7 +89,7 @@ async function fixture(custom?: (request: FixtureRequest) => { status?: number, 
         const review = { id: nextId++, body: request.body.body, commit_id: request.body.commit_id, user: bot }
         reviews.push(review)
         for (const raw of request.body.comments as Record<string, unknown>[])
-          findings.push({ ...raw, id: nextId++, user: bot, pull_request_url: 'https://api.github.com/repos/acme/project/pulls/1' })
+          findings.push({ ...raw, id: nextId++, user: bot, commit_id: request.body.commit_id, original_commit_id: request.body.commit_id, pull_request_url: 'https://api.github.com/repos/acme/project/pulls/1' })
         response = { body: review }
       }
       else if (path === '/repos/acme/project/pulls/1/reviews') {
@@ -141,11 +141,11 @@ async function fixture(custom?: (request: FixtureRequest) => { status?: number, 
   } }
 }
 
-function publication(effect: PublicationEffect, key = 'result', runId = 'run-1'): PublicationContext {
+function publication(effect: PublicationEffect, key = 'result', runId = 'run-1', targetHead = head): PublicationContext {
   return {
     signal: new AbortController().signal,
     publication: { id: key, key, runId, taskId: 'publish', effect, state: { _tag: 'Queued' }, attempts: 0, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() },
-    run: { id: runId, event: { id: 'event-1', source: 'manual', name: 'pull_request', action: 'opened', repository, actor: null, target: { _tag: 'PullRequest', number: 1, headSha: head, baseSha: base }, occurredAt: new Date(now).toISOString(), receivedAt: new Date(now).toISOString(), semanticKey: 'head', data: null }, definition: { version: 1, id: 'review', name: 'Review', on: [], tasks: [], concurrency: { mode: 'replace', group: 'target' }, limits: { maxAttempts: 1, timeoutMs: 1000, maxTokens: 1000, maxCostUsd: 1, maxDurationMs: 1000 } }, definitionDigest: 'digest', configuration: { source: 'test', sha: base, digest: 'digest' }, policy: { enabled: true, capabilities: ['repository:read', 'github:review', 'github:comment', 'github:check'], maxConcurrency: 1 }, state: { _tag: 'Running' }, tasks: [], usage: { inputTokens: 0, outputTokens: 0, costUsd: null }, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), startedAt: null, finishedAt: null },
+    run: { id: runId, event: { id: 'event-1', source: 'manual', name: 'pull_request', action: 'opened', repository, actor: null, target: { _tag: 'PullRequest', number: 1, headSha: targetHead, baseSha: base }, occurredAt: new Date(now).toISOString(), receivedAt: new Date(now).toISOString(), semanticKey: 'head', data: null }, definition: { version: 1, id: 'review', name: 'Review', on: [], tasks: [], concurrency: { mode: 'replace', group: 'target' }, limits: { maxAttempts: 1, timeoutMs: 1000, maxTokens: 1000, maxCostUsd: 1, maxDurationMs: 1000 } }, definitionDigest: 'digest', configuration: { source: 'test', sha: base, digest: 'digest' }, policy: { enabled: true, capabilities: ['repository:read', 'github:review', 'github:comment', 'github:check'], maxConcurrency: 1 }, state: { _tag: 'Running' }, tasks: [], usage: { inputTokens: 0, outputTokens: 0, costUsd: null }, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), startedAt: null, finishedAt: null },
   }
 }
 
@@ -296,6 +296,39 @@ describe('gitHub publication reconciliation', () => {
     const next = publication(context.publication.effect, 'new-result', 'run-2')
     expect(await publisher.publish(next)).toMatchObject({ _tag: 'Ok' })
     expect(test.findings).toHaveLength(2)
+  })
+
+  it.each([false, true])('publishes a returning finding after a clean intervening head (old anchor moved: %s)', async (anchorMoved) => {
+    const test = await fixture()
+    const publisher = createGitHubPublisher({ client: test.client })
+    const comments = [{ fingerprint: 'returning-defect', path: 'src/a.ts', line: 1, side: 'RIGHT' as const, body: 'This defect returned.' }]
+    expect(await publisher.publish(publication({ _tag: 'Review', repository: repository.fullName, number: 1, headSha: head, body: 'One finding.', comments }, 'first-finding'))).toMatchObject({ _tag: 'Ok' })
+    const cleanHead = 'c'.repeat(40)
+    test.moveHead(cleanHead)
+    expect(await publisher.publish(publication({ _tag: 'Comment', repository: repository.fullName, number: 1, namespace: 'review', body: 'No actionable findings.' }, 'clean-overview', 'clean-run', cleanHead))).toMatchObject({ _tag: 'Ok' })
+    const returningHead = 'd'.repeat(40)
+    test.moveHead(returningHead)
+    if (anchorMoved)
+      test.findings[0]!.commit_id = returningHead
+    expect(await publisher.publish(publication({ _tag: 'Review', repository: repository.fullName, number: 1, headSha: returningHead, body: 'One new finding.', comments }, 'returning-finding', 'returning-run', returningHead))).toMatchObject({ _tag: 'Ok' })
+    expect(test.findings.map(finding => finding.original_commit_id)).toEqual([head, returningHead])
+  })
+
+  it('does not reconcile an interrupted review with a finding from an older head', async () => {
+    const test = await fixture()
+    const publisher = createGitHubPublisher({ client: test.client })
+    const comments = [{ fingerprint: 'returning-defect', path: 'src/a.ts', line: 1, side: 'RIGHT' as const, body: 'This defect returned.' }]
+    expect(await publisher.publish(publication({ _tag: 'Review', repository: repository.fullName, number: 1, headSha: head, body: 'One finding.', comments }, 'first-finding'))).toMatchObject({ _tag: 'Ok' })
+    const returningHead = 'd'.repeat(40)
+    test.moveHead(returningHead)
+    const current = publication({ _tag: 'Review', repository: repository.fullName, number: 1, headSha: returningHead, body: 'One new finding.', comments }, 'interrupted-finding', 'returning-run', returningHead)
+    test.reviews.push({ id: 500, body: `One new finding.\n\n${publicationMarker(current.publication.id)}`, commit_id: returningHead, user: bot })
+    expect(await publisher.reconcile(current)).toEqual({ _tag: 'Ok', value: null })
+    expect(await publisher.publish(current)).toMatchObject({ _tag: 'Ok' })
+    const written = await publisher.reconcile(current)
+    expect(written).toMatchObject({ _tag: 'Ok', value: { id: '500' } })
+    expect(await publisher.publish(current)).toEqual(written)
+    expect(test.findings.map(finding => finding.commit_id)).toEqual([head, returningHead])
   })
 
   it('updates one check through queued, running, and timeout states', async () => {
