@@ -2,6 +2,7 @@ import type { WorkflowStore } from './store.ts'
 import type { ConfigurationSource, EventEnvelope, PublicationEffect, PublicationPublisher, PublicationRecord, RepositoryPolicy, Result, RunRecord, TaskFailure, TaskOutcome, TaskRecord, TaskType, Usage, WorkflowDefinition } from './types.ts'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import { isCancelledOverview } from './lifecycle.ts'
 import { err, isJsonValue, ok } from './types.ts'
 import { compileWorkflow, conditionMatches, digest, matchesWorkflow, parseEvent, parseWorkflow, resolveTaskInputs, targetKey, taskLimits } from './workflow.ts'
 
@@ -407,7 +408,7 @@ export function createRunner(options: RunnerOptions) {
       return false
     if (!terminal(run.state))
       return true
-    return publication.taskId === '__lifecycle' && ((publication.effect._tag === 'Check' && publication.effect.phase.status === 'completed') || (publication.effect._tag === 'Comment' && run.state._tag === 'Failed'))
+    return isCancelledOverview(publication, run) || (publication.taskId === '__lifecycle' && ((publication.effect._tag === 'Check' && publication.effect.phase.status === 'completed') || (publication.effect._tag === 'Comment' && run.state._tag === 'Failed')))
   }
   const publicationCall = async <T>(publication: PublicationRecord, stage: string, call: () => Promise<Result<T>>): Promise<Result<T>> => Promise.resolve().then(call).catch(() => {
     if (!stopping)
