@@ -119,6 +119,10 @@ export async function createOctorun(options: OctorunServiceOptions) {
     },
   }
   const reviewTypes = createReviewTaskTypes({ provider: provider.value, snapshots: createGitHubSnapshotReader(client), previousReview: async (context) => {
+    if (context.run.definition.tasks.filter(task => task.uses === 'review.snapshot').length !== 1
+      || context.run.definition.tasks.filter(task => task.uses === 'review.verify').length !== 1) {
+      return null
+    }
     let previous: RunRecord | undefined
     for (const run of store.scanRuns({ repository: context.event.repository.fullName, states: ['Succeeded'], order: 'newest' })) {
       if (run.id !== context.run.id && targetKey(run.event) === targetKey(context.event) && run.definition.id === context.run.definition.id) {
@@ -272,12 +276,11 @@ export async function createOctorun(options: OctorunServiceOptions) {
       if (selected._tag === 'Err')
         return selected
       const id = command._tag === 'Run' ? command.workflow : 'adversarial-review'
-      let workflow = selected.value.workflows.find(candidate => candidate.id === id)
+      const workflow = selected.value.workflows.find(candidate => candidate.id === id)
       if (!workflow)
         return err({ _tag: 'Configuration', message: `Workflow is not configured: ${id}.` })
-      if (command._tag === 'Review' && command.full)
-        workflow = { ...workflow, tasks: workflow.tasks.map(task => task.uses === 'review.snapshot' ? { ...task, with: { ...task.with, full: true } } : task) }
-      const started = startWorkflow({ ...event, name: 'octorun.command', action: 'command' }, workflow, repository, selected.value.configuration, `command:${event.semanticKey}`)
+      const data = event.data !== null && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {}
+      const started = startWorkflow({ ...event, name: 'octorun.command', action: 'command', data: { ...data, full: command._tag === 'Review' && command.full } }, workflow, repository, selected.value.configuration, `command:${event.semanticKey}`)
       if (started._tag === 'Err')
         return started
       runId = started.value.id

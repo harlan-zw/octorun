@@ -36,6 +36,7 @@ Octorun checks commit ancestry before reusing coverage.
 The previous review must match the base commit, workflow, configuration, and task versions.
 A changed provider configuration also requires a full review.
 The newest incomplete review prevents reuse of an older complete review.
+If a workflow contains multiple `review.snapshot` or `review.verify` tasks, Octorun uses full reviews.
 
 | Condition | Review scope |
 | --- | --- |
@@ -46,6 +47,7 @@ The newest incomplete review prevents reuse of an older complete review.
 | `@octorun review full` | Full pull request, without inherited findings |
 
 Use your configured handle instead of `@octorun`.
+An explicit full review can become the baseline for later incremental reviews.
 The overview identifies the scope and reviewed commit.
 Changed files are reviewed again, so a fixed finding disappears when the review no longer confirms it.
 If the defect returns later, Octorun can publish it again.

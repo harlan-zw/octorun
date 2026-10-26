@@ -23,7 +23,7 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).reverse().map(close => close()))
 })
 
-async function setup(options: { failProvider?: boolean, sourceText?: string, omitProviderKey?: boolean } = {}) {
+async function setup(options: { failProvider?: boolean, sourceText?: string, omitProviderKey?: boolean, generate?: AgentProvider['generate'] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'octorun-service-'))
   const config: OperatorConfig = { version: 1, stateDir, host: '127.0.0.1', port: 0, handle: 'octorun', github: { appId: '7', privateKeyEnv: 'APP_KEY', webhookSecretEnv: 'WEBHOOK_SECRET', apiUrl: 'https://api.github.com' }, provider: { _tag: 'OpenAICompatible', baseUrl: 'https://provider.example/v1', model: 'test-model', apiKeyEnv: 'API_KEY', timeoutMs: 1000, maxResponseBytes: 1024, maxInputCharacters: 100000 }, repositories: [{ ...repo, policy: { enabled: true, capabilities: ['repository:read', 'agent:invoke', 'github:comment', 'github:review', 'github:check'], maxConcurrency: 2 }, workflowSource: options.sourceText ? { _tag: 'Repository', path: '.github/octorun.yml' } : { _tag: 'Presets', presets: ['adversarial-review'] } }], pollIntervalMs: 0, limits: { bodyBytes: 1024 * 1024, requestsPerMinute: 100, concurrency: 2 } }
   let currentHead = head
@@ -105,6 +105,8 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
   const provider: AgentProvider = { id: 'test-provider', inputTokenOverhead: 256, async generate(request) {
     providerCalls++
     providerRequests.push(request)
+    if (options.generate)
+      return options.generate(request)
     if (options.failProvider)
       return { _tag: 'Err', error: { _tag: 'Permanent', message: 'The provider rejected this request.' } }
     return ok({ text: request.messages[0]!.content.includes('release') ? 'Update the input parser.' : '{"findings":[]}', usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
@@ -277,6 +279,60 @@ describe('reactive service composition', () => {
     expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'custom-review', requestId: 'incremental-after-restart' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
     expect(test.providerRequests.slice(2).map(request => JSON.parse(request.messages[1]!.content).files.map((file: { path: string }) => file.path))).toEqual([['src/b.ts'], ['src/b.ts']])
     expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Incremental review of 1 changed path since \`${head.slice(0, 12)}\``)])
+  })
+
+  it('reuses a complete full-command review for the next empty commit', async () => {
+    const test = await setup()
+    const request = test.client.request
+    test.client.request = async (repository, access, path, options) => path.includes('/compare/')
+      ? ok({ status: 'ahead', base_commit: { sha: head }, merge_base_commit: { sha: head }, files: [] })
+      : request(repository, access, path, options)
+    await test.webhook('issue_comment', issueComment('@octorun review full'), 'full-review-command')
+    await test.service().settle()
+    expect(test.providerCalls()).toBe(2)
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Full pull request review.')])
+    test.moveHead('c'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'empty-after-full-command' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerCalls()).toBe(2)
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Incremental review of 0 changed paths since \`${head.slice(0, 12)}\``)])
+  })
+
+  it('keeps separate review chains on full scope instead of sharing findings', async () => {
+    const test = await setup({ generate: async (request) => {
+      const instructions = request.messages[0]!.content
+      const text = instructions.includes('Independently challenge')
+        ? JSON.stringify({ accepted: (JSON.parse(request.messages[1]!.content).findings as { id: string }[]).map(finding => finding.id) })
+        : JSON.stringify({ findings: [{ path: instructions.includes('correctness specialist') ? 'src/a.ts' : 'src/b.ts', side: 'RIGHT', line: 1, title: 'A concrete defect', body: 'The changed value rejects a valid input.', evidence: instructions.includes('correctness specialist') ? 'new' : 'after', severity: 'high', confidence: 95 }] })
+      return ok({ text, usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
+    } })
+    const workflow = adversarialReviewPreset()
+    test.config.repositories[0]!.workflowSource = { _tag: 'Inline', definitions: [{ ...workflow, id: 'separate-reviews', tasks: ['correctness', 'security'].flatMap(role => [
+      { id: `${role}-snapshot`, uses: 'review.snapshot', with: {} },
+      { id: `${role}-reviewers`, uses: 'review.adversarial', with: { snapshot: { $ref: `tasks.${role}-snapshot.output` }, roles: [role] } },
+      { id: `${role}-verify`, uses: 'review.verify', with: { snapshot: { $ref: `tasks.${role}-snapshot.output` }, review: { $ref: `tasks.${role}-reviewers.output` } } },
+    ]) }] }
+    test.client.files = async () => ok([
+      { path: 'src/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', status: 'modified', truncated: false, additions: 1, deletions: 1 },
+      { path: 'src/b.ts', patch: '@@ -1 +1 @@\n-before\n+after', status: 'modified', truncated: false, additions: 1, deletions: 1 },
+    ])
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'separate-reviews', requestId: 'first-separate-reviews' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'separate-reviews', requestId: 'second-separate-reviews' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    const latest = test.service().runner.runs({ order: 'newest' })[0]!
+    expect(latest.tasks.find(task => task.definition.id === 'security-verify')?.output).toMatchObject({ scope: { _tag: 'Full' }, findings: [{ path: 'src/b.ts' }] })
+    expect(latest.tasks.find(task => task.definition.id === 'correctness-verify')?.output).toMatchObject({ scope: { _tag: 'Full' }, findings: [{ path: 'src/a.ts' }] })
+  })
+
+  it('requires new coverage when the configured reviewers change after a full command', async () => {
+    const test = await setup()
+    const workflow = adversarialReviewPreset()
+    test.config.repositories[0]!.workflowSource = { _tag: 'Inline', definitions: [workflow] }
+    await test.webhook('issue_comment', issueComment('@octorun review full'), 'full-before-configuration-change')
+    await test.service().settle()
+    workflow.tasks.find(task => task.uses === 'review.adversarial')!.with.roles = ['security']
+    test.moveHead('c'.repeat(40))
+    expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'changed-reviewers-after-full' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
+    expect(test.providerCalls()).toBe(3)
+    expect(JSON.parse(test.providerRequests.at(-1)!.messages[1]!.content)).toMatchObject({ scope: { _tag: 'Full', reason: 'initial' }, files: [{ path: 'src/a.ts' }] })
   })
 
   it('does not reuse coverage after the provider binding changes', async () => {
