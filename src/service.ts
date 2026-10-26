@@ -341,7 +341,7 @@ export async function createOctorun(options: OctorunServiceOptions) {
           if (comments._tag === 'Err')
             return comments
           const history = comments.value.filter(raw => githubObject(raw)?.in_reply_to_id === data.inReplyToId && githubObject(raw)?.id !== data.commentId).slice(-20).map(raw => ({ role: githubObject(githubObject(raw)?.user)?.id === bot.value.id ? 'assistant' : 'user', content: String(githubObject(raw)?.body ?? '').slice(0, 4000) }))
-          const conversation: EventEnvelope = { ...event, name: 'octorun.conversation', data: { commentId: data.inReplyToId, question: data.body.slice(0, 8000), reviewedHeadSha: typeof rootComment.commit_id === 'string' ? rootComment.commit_id : null, finding: { body: String(rootComment.body ?? '').slice(0, 10000), path: typeof rootComment.path === 'string' ? rootComment.path : null, line: typeof rootComment.line === 'number' ? rootComment.line : null }, history } }
+          const conversation: EventEnvelope = { ...event, name: 'octorun.conversation', data: { commentId: data.inReplyToId, question: data.body.slice(0, 8000), reviewedHeadSha: typeof rootComment.original_commit_id === 'string' ? rootComment.original_commit_id : null, finding: { body: String(rootComment.body ?? '').slice(0, 10000), path: typeof rootComment.path === 'string' ? rootComment.path : null, line: typeof rootComment.line === 'number' ? rootComment.line : null }, history } }
           const started = startWorkflow(conversation, conversationPreset(), repository.value, { source: 'operator:review-conversation', sha: 'operator', digest: 'review-conversation-v1' }, `conversation:${event.semanticKey}`)
           return started._tag === 'Err' ? started : ok({ runId: started.value.id })
         }

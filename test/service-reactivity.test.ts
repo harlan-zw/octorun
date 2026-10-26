@@ -23,6 +23,7 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
   let open = true
   let draft = false
   let archived = false
+  let currentHead = head
   let providerCalls = 0
   let abortedCalls = 0
   let clockMs = now.getTime()
@@ -30,16 +31,18 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
   const comments: Record<string, unknown>[] = []
   const replies: Record<string, unknown>[] = []
   const checks: Record<string, unknown>[] = []
+  const prompts: string[] = []
   const root = {
     id: 50,
     user: { id: options.ownsFinding === false ? 91 : bot.id },
     commit_id: head,
+    original_commit_id: head,
     path: 'src/a.ts',
     line: 1,
     pull_request_url: 'https://api.github.com/repos/acme/project/pulls/1',
     body: `A concrete finding.\n\n${findingMarker('finding-one')}\n${publicationMarker('publication-one')}`,
   }
-  const snapshot = (): PullRequestSnapshot => ({ repository, number: 1, headSha: head, baseSha: base, title: 'Change parser', body: '', author: user, draft, state: open ? 'open' : 'closed', changedFiles: 1, updatedAt: now.toISOString(), labels: [], headRepository: repository.fullName })
+  const snapshot = (): PullRequestSnapshot => ({ repository, number: 1, headSha: currentHead, baseSha: base, title: 'Change parser', body: '', author: user, draft, state: open ? 'open' : 'closed', changedFiles: 1, updatedAt: now.toISOString(), labels: [], headRepository: repository.fullName })
   const client: GitHubClient = {
     auth: { appId: 7, token: async () => ok({ token: 'fixture', expiresAt: '2026-10-23T00:00:00Z', installationId: 20 }), identity: async () => ok({ id: 7, slug: 'octorun' }), invalidate: () => {} },
     repository: async () => ok({ ref: repository, defaultBranch: 'main', private: false, archived }),
@@ -112,6 +115,7 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
     id: 'fixture',
     async generate(request) {
       providerCalls++
+      prompts.push(request.messages.at(-1)!.content)
       if (options.holdProvider) {
         return new Promise((resolve) => {
           request.signal.addEventListener('abort', () => {
@@ -142,12 +146,17 @@ async function setup(options: { ownsFinding?: boolean, permission?: 'read' | 'wr
     comments,
     replies,
     checks,
+    prompts: () => prompts,
     calls: () => providerCalls,
     aborted: () => abortedCalls,
     service: () => service,
     closePr: () => { open = false },
     setDraft: () => { draft = true },
     archive: () => { archived = true },
+    setHead: (sha: string) => {
+      currentHead = sha
+      root.commit_id = sha
+    },
     advanceClock: () => { clockMs += 5000 },
     async restart() {
       await service.close()
@@ -249,6 +258,18 @@ describe('controls with retained history', () => {
 })
 
 describe('finding conversations', () => {
+  it('keeps the original finding revision when GitHub moves its current comment revision', async () => {
+    const test = await setup()
+    const currentHead = 'c'.repeat(40)
+    test.setHead(currentHead)
+    await test.comment('Does this finding still apply after the new commit?')
+    await test.service().settle()
+
+    expect(test.calls()).toBe(1)
+    expect(JSON.parse(test.prompts()[0]!)).toMatchObject({ reviewedHeadSha: head, current: { headSha: currentHead } })
+    expect(test.replies).toEqual([expect.objectContaining({ in_reply_to_id: 50, body: expect.stringContaining('The finding applies') })])
+  })
+
   it.each(['Why does this fail?', '@octorun Why does this fail?'])('answers an authorized finding question: %s', async (question) => {
     const test = await setup()
     expect((await test.comment(question))._tag).toBe('Ok')
