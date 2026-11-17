@@ -109,7 +109,7 @@ async function setup(options: { failProvider?: boolean, sourceText?: string, omi
       return options.generate(request)
     if (options.failProvider)
       return { _tag: 'Err', error: { _tag: 'Permanent', message: 'The provider rejected this request.' } }
-    return ok({ text: request.messages[0]!.content.includes('release') ? 'Update the input parser.' : '{"findings":[]}', usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
+    return ok({ text: request.messages[0]!.content.includes('change summary') ? 'Update the input parser.' : '{"findings":[]}', usage: { inputTokens: 5, outputTokens: 5, costUsd: null } })
   } }
   const create = async (): Promise<OctorunService> => {
     const created = await createOctorun({ config, env: { APP_KEY: 'fixture-private-key', ...(!options.omitProviderKey ? { API_KEY: 'fixture-api-key' } : {}), WEBHOOK_SECRET: secret }, now: () => new Date(clockMs), client, provider })

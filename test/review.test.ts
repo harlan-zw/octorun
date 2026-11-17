@@ -483,6 +483,21 @@ describe('custom change summary chain', () => {
     expect(h.effects).toMatchObject([{ _tag: 'Comment', namespace: 'change-summary', body: 'Handle account names directly.' }])
   })
 
+  it('sends operator summary instructions to the agent', async () => {
+    const h = harness(['Account names no longer fall back.'])
+    const changes = await successful(h.execute('changes.classify', {}))
+    await successful(h.execute('changes.summarize', { changes, instructions: '  Write one sentence for the release reader.  ' }))
+    expect(h.requests[0]!.messages[0]!.content).toContain('Write one sentence for the release reader.')
+  })
+
+  it.each([' ', 'x'.repeat(8_001), 42])('refuses invalid summary instructions before an agent turn: %#', async (instructions) => {
+    const h = harness([])
+    const changes = await successful(h.execute('changes.classify', {}))
+    const type = h.types.find(type => type.id === 'changes.summarize') as TaskType
+    expect(type.input({ changes, instructions })).toMatchObject({ _tag: 'Err' })
+    expect(h.turns).toEqual([])
+  })
+
   it('refuses malformed task inputs before requesting an agent turn', () => {
     const h = harness([])
     const type = h.types.find(type => type.id === 'review.conversation') as TaskType
