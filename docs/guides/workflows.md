@@ -115,6 +115,10 @@ workflows:
             $ref: tasks.summarize.output
 ```
 
+By default, `changes.summarize` writes a short summary for a reviewer.
+To use your own writing brief, set `instructions` beside `changes`, up to 8,000 characters.
+Octorun still applies its untrusted data rule and reports incomplete coverage.
+
 Operator-owned definitions use `_tag: Inline` with a `definitions` list in the same format.
 Use `maxCostUsd: null` with the HTTP provider, which cannot establish the next request's price before sending it.
 Token and duration budgets still apply.
