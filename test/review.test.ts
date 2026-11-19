@@ -253,7 +253,7 @@ describe('adversarial review preset', () => {
     const verified = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
     await successful(h.execute('review.publish', { report: verified }))
     expect(h.effects).toMatchObject([
-      { _tag: 'Comment', body: expect.stringContaining('1 actionable finding') },
+      { _tag: 'Comment', body: expect.stringContaining('1 finding to address') },
       { _tag: 'Review', headSha, comments: [{ path: 'src/account.ts', line: 2, side: 'RIGHT', body: expect.stringContaining('Handle missing accounts') }] },
     ])
     expect(h.effects.filter(effect => effect._tag === 'Review').flatMap(effect => effect.comments)).toHaveLength(1)
@@ -275,7 +275,7 @@ describe('adversarial review preset', () => {
     const verified = await successful(h.execute('review.verify', { snapshot: selected, review: reviewed }))
     await successful(h.execute('review.publish', { report: verified }))
     expect(verified).toMatchObject({ outcome: 'incomplete', coverage: 'incomplete', findings: [] })
-    expect(h.effects).toMatchObject([{ _tag: 'Comment', body: expect.stringContaining('scope is incomplete') }])
+    expect(h.effects).toMatchObject([{ _tag: 'Comment', body: expect.stringContaining('Review incomplete.') }])
     expect(h.turns).toEqual([])
   })
 

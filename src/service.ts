@@ -231,9 +231,9 @@ export async function createOctorun(options: OctorunServiceOptions) {
       if (targetKey(run.event) === targetKey(event) && run.definition.id !== 'command-response')
         return `${run.definition.name}: ${run.state._tag}.\nHead: ${run.event.target._tag === 'PullRequest' ? run.event.target.headSha.slice(0, 12) : 'not applicable'}.\nRun: ${run.id}.`
     }
-    return 'No workflow run exists for this target.'
+    return 'Octorun has no workflow runs here yet.'
   }
-  const help = `Use @${config.handle} help, status, configuration, review, review full, run <workflow>, pause, resume, or cancel.\nRepair workflows are disabled.`
+  const help = `Start a comment with \`@${config.handle}\` and one of these commands.\n\n- \`help\`, \`status\`, or \`configuration\`\n- \`review\` or \`review full\`\n- \`run <workflow>\`\n- \`pause\`, \`resume\`, or \`cancel\`\n\nRepair workflows are disabled.`
   const executeCommand = async (event: EventEnvelope, repository: ConfiguredRepository, command: GitHubCommand): Promise<Result<JsonValue>> => {
     const previous = store.cursor(`command:${event.semanticKey}`)
     if (previous !== null)
