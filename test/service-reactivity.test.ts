@@ -310,7 +310,7 @@ describe('finding conversations', () => {
     await test.comment('@octorun help', false)
     await test.service().settle()
     expect(test.calls()).toBe(0)
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Use @octorun help')])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Start a comment with `@octorun`')])
   })
 })
 
@@ -433,7 +433,7 @@ describe('pull request eligibility', () => {
     options.holdProvider = false
     await test.service().command('run', { repository: repository.fullName, number: 1, requestId: 'new-review' })
     const completed = test.comments.map(comment => ({ id: comment.id, body: comment.body }))
-    expect(completed).toEqual([expect.objectContaining({ body: expect.stringContaining('No actionable findings') })])
+    expect(completed).toEqual([expect.objectContaining({ body: expect.stringContaining('No findings to address.') })])
 
     await test.restart()
     await test.service().settle()

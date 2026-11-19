@@ -248,7 +248,7 @@ describe('reactive service composition', () => {
     await test.service().settle()
     expect(test.providerCalls()).toBe(0)
     expect(test.service().runner.runs().map(run => run.state)).toEqual([{ _tag: 'Succeeded' }])
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('No workflow run exists')])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Octorun has no workflow runs here yet.')])
     expect(test.service().store.pendingDeliveries()).toEqual([])
   })
 
@@ -257,7 +257,7 @@ describe('reactive service composition', () => {
     const result = await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'manual-one' })
     expect(result).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded', targetKey: '10:pull_request:1' } })
     expect(test.providerCalls()).toBe(2)
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('No actionable findings')])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('No findings to address.')])
     expect(test.checkRuns.map(check => ({ status: check.status, conclusion: check.conclusion }))).toEqual([{ status: 'completed', conclusion: 'success' }])
   })
 
@@ -278,7 +278,7 @@ describe('reactive service composition', () => {
     test.moveHead('c'.repeat(40))
     expect(await test.service().command('run', { repository: repo.fullName, number: 1, workflow: 'custom-review', requestId: 'incremental-after-restart' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
     expect(test.providerRequests.slice(2).map(request => JSON.parse(request.messages[1]!.content).files.map((file: { path: string }) => file.path))).toEqual([['src/b.ts'], ['src/b.ts']])
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Incremental review of 1 changed path since \`${head.slice(0, 12)}\``)])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Changes since commit \`${head.slice(0, 12)}\` touch 1 file.`)])
   })
 
   it('reuses a complete full-command review for the next empty commit', async () => {
@@ -290,11 +290,11 @@ describe('reactive service composition', () => {
     await test.webhook('issue_comment', issueComment('@octorun review full'), 'full-review-command')
     await test.service().settle()
     expect(test.providerCalls()).toBe(2)
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Full pull request review.')])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Compared with the base branch.')])
     test.moveHead('c'.repeat(40))
     expect(await test.service().command('run', { repository: repo.fullName, number: 1, requestId: 'empty-after-full-command' })).toMatchObject({ _tag: 'Ok', value: { state: 'Succeeded' } })
     expect(test.providerCalls()).toBe(2)
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Incremental review of 0 changed paths since \`${head.slice(0, 12)}\``)])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining(`Changes since commit \`${head.slice(0, 12)}\` touch 0 files.`)])
   })
 
   it('keeps separate review chains on full scope instead of sharing findings', async () => {
@@ -396,7 +396,7 @@ describe('reactive service composition', () => {
   it('keeps provider failure separate from a clean review', async () => {
     const test = await setup({ failProvider: true })
     expect(await test.service().command('run', { repository: repo.fullName, number: 1 })).toMatchObject({ _tag: 'Ok', value: { state: 'Failed' } })
-    expect(test.comments.some(comment => String(comment.body).includes('No actionable findings'))).toBe(false)
+    expect(test.comments.some(comment => String(comment.body).includes('No findings to address.'))).toBe(false)
     expect(test.checkRuns.map(check => check.conclusion)).toEqual(['failure'])
   })
 
@@ -415,7 +415,7 @@ describe('reactive service composition', () => {
     await test.webhook('issue_comment', issueComment('@octorun repair everything now', 2), 'unknown-two')
     await test.service().settle()
     expect(test.providerCalls()).toBe(0)
-    expect(test.comments.map(comment => comment.body)).toEqual(expect.arrayContaining([expect.stringContaining('Use @octorun help'), expect.stringContaining('Unknown command')]))
+    expect(test.comments.map(comment => comment.body)).toEqual(expect.arrayContaining([expect.stringContaining('Start a comment with `@octorun`'), expect.stringContaining('Unknown command')]))
   })
 
   it('denies model spending by a reader and allows information commands', async () => {
@@ -425,7 +425,7 @@ describe('reactive service composition', () => {
     await test.webhook('issue_comment', issueComment('@octorun status', 2), 'allowed-status')
     await test.service().settle()
     expect(test.providerCalls()).toBe(0)
-    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('No workflow run exists')])
+    expect(test.comments.map(comment => comment.body)).toEqual([expect.stringContaining('Octorun has no workflow runs here yet.')])
   })
 
   it('acknowledges pause and still runs an explicit review request', async () => {
